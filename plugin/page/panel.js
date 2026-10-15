@@ -16,6 +16,8 @@
   var sizeHint = document.getElementById('sizeHint')
   var hotkeyValue = document.getElementById('hotkeyValue')
   var hotkeyHint = document.getElementById('hotkeyHint')
+  var hotkeySetBtn = document.getElementById('hotkeySetBtn')
+  var utoolsHotkeyBtn = document.getElementById('utoolsHotkeyBtn')
 
   // preload 没挂上（加载失败、被别的插件顶掉）时给个能看懂的提示，
   // 而不是让所有按钮点下去毫无反应。
@@ -57,16 +59,124 @@
       (state.chatOpen ? '对话窗正开着，改动下次开窗生效（它是 uTools 的浏览器窗口，改不了正在开的那个）。'
         : '改动下次开窗生效。')
 
-    // 快捷键。uTools 自己管着系统级注册，面板只负责显示"现在配的是哪个键"，
-    // 点「设置」跳去它那边配（面板里没法直接抓按键组合）。
-    hotkeyValue.textContent = state.hotkey || '未设置'
-    hotkeyValue.classList.toggle('none', !state.hotkey)
-    hotkeyHint.textContent = state.hotkey
-      ? '按 ' + state.hotkey + ' 把对话窗叫到跟前（没开就打开，藏着或被盖住就摆到最前）。' +
-        '快捷键只负责叫出来、不会关窗 —— 关窗点悬浮球，或用对话窗自己的关闭按钮。'
-      : '在 uTools 的全局快捷键里给「' + (state.hotkeyCmd || 'DeepSeek窗口') +
-        '」这条指令绑一个键，就能随时把对话窗叫出来 —— 点「设置」直接跳过去。'
+    // 全局快捷键：插件自己注册（Windows 的 RegisterHotKey），不依赖 uTools 的快捷键页 ——
+    // uTools 那边设不了 Ctrl+Space 这类组合。面板这边负责显示状态和"按一下改键"。
+    renderHotkey(state)
   }
+
+  function renderHotkey(state) {
+    var spec = state.hotkey || ''
+    hotkeyValue.textContent = spec || '未设置'
+    hotkeyValue.classList.toggle('none', !spec)
+
+    var st = state.hotkeyState || {}
+    if (capturing) {
+      hotkeyHint.textContent = '现在按下你要用的组合键（要带 Ctrl / Alt / Shift / Win 里的至少一个），Esc 取消。'
+      return
+    }
+    if (st.state === 'unsupported') {
+      hotkeyHint.textContent = '⚠ 用不了：' + (st.message || '这个环境不支持') +
+        '。插件会退回用 uTools 的快捷键（下面那个入口）。'
+      return
+    }
+    if (st.state === 'fail') {
+      hotkeyHint.textContent = '⚠ 没注册上：' + (st.message || '') +
+        '。多半是这个名字被别的程序占着（Ctrl+Space 在 Windows 上默认归输入法的中英切换），换一个试试。'
+      return
+    }
+    hotkeyHint.textContent = '插件自己注册的系统级热键，按一下开/关对话窗（和点悬浮球一样）。' +
+      '插件被 uTools 回收后它会有最多一分钟的空档 —— 插件每分钟会把自己拉回来；' +
+      '在 uTools 设置里关掉这个插件的「自动结束」就不会有空档。'
+    utoolsHotkeyBtn.textContent = state.utoolsHotkey
+      ? 'uTools 那边还绑着 ' + state.utoolsHotkey + '（也可以点这里改）'
+      : '也可以在 uTools 的快捷键设置里给「' + (state.hotkeyCmd || 'DeepSeek窗口') + '」绑一个键'
+  }
+
+  // ---- 按键捕获：面板里直接按下组合键来设热键 ----
+
+  var capturing = false
+
+  // e.key → 小助手的键名（helper/hotkey.cs 里那张表对得上）
+  var KEY_NAMES = {
+    ' ': 'Space',
+    Enter: 'Enter',
+    Tab: 'Tab',
+    Escape: 'Esc',
+    Backspace: 'Backspace',
+    Delete: 'Delete',
+    Insert: 'Insert',
+    ArrowUp: 'Up',
+    ArrowDown: 'Down',
+    ArrowLeft: 'Left',
+    ArrowRight: 'Right',
+    Home: 'Home',
+    End: 'End',
+    PageUp: 'PageUp',
+    PageDown: 'PageDown'
+  }
+
+  function keyNameOf(e) {
+    var key = e.key
+    if (KEY_NAMES[key]) return KEY_NAMES[key]
+    if (/^[a-zA-Z]$/.test(key)) return key.toUpperCase()
+    if (/^[0-9]$/.test(key)) return key
+    if (/^F([1-9]|1[0-9]|2[0-4])$/.test(key)) return key
+    if ('-=[]\\;\',./`'.indexOf(key) !== -1) return key
+    return null
+  }
+
+  function startCapture() {
+    capturing = true
+    hotkeySetBtn.textContent = '按组合键…'
+    renderHotkey(lastState || {})
+  }
+
+  function stopCapture() {
+    capturing = false
+    hotkeySetBtn.textContent = '改键'
+  }
+
+  function onCaptureKeydown(e) {
+    if (!capturing) return
+    e.preventDefault()
+    e.stopPropagation()
+    if (e.key === 'Escape') {
+      stopCapture()
+      if (lastState) renderHotkey(lastState)
+      return
+    }
+    // 只按修饰键不算数
+    if (['Control', 'Alt', 'Shift', 'Meta'].indexOf(e.key) !== -1) return
+
+    var name = keyNameOf(e)
+    if (!name) {
+      hotkeyHint.textContent = '这个键不认：「' + e.key + '」，换一个（字母、数字、F1-F24、方向键都行）。'
+      return
+    }
+    if (!e.ctrlKey && !e.altKey && !e.shiftKey && !e.metaKey) {
+      // 不带修饰键的话就是个全局单键，会把那个键从所有程序手里抢走 —— 不做
+      hotkeyHint.textContent = '要带 Ctrl / Alt / Shift / Win 里的至少一个，否则会把「' + name +
+        '」这个键从所有程序手里抢走。'
+      return
+    }
+    var parts = []
+    if (e.ctrlKey) parts.push('Ctrl')
+    if (e.altKey) parts.push('Alt')
+    if (e.shiftKey) parts.push('Shift')
+    if (e.metaKey) parts.push('Win')
+    parts.push(name)
+    var spec = parts.join('+')
+
+    stopCapture()
+    try {
+      render(host.setHotkey(spec))
+    } catch (err) {
+      console.error('[panel] 设置快捷键失败:', err)
+      hotkeyHint.textContent = '设置失败：' + ((err && err.message) || err)
+    }
+  }
+
+  document.addEventListener('keydown', onCaptureKeydown, true)
 
   /** 读两个输入框。填的不是正整数就返回 null，让调用方提示并回填 */
   function readSize() {
@@ -92,8 +202,17 @@
     resetPos: function () { return host.resetBallPos() },
     applySize: applySize,
     resetSize: function () { return host.resetChatSize() },
-    // 只读显示，改不了按键 —— 点了就往 uTools 的全局快捷键设置跳
-    hotkey: function () { return host.openHotkeySetting() && host.state() },
+    // 改键：进入"按一下组合键"的捕获状态，真正的注册在 preload 里（见 js/hotkey.js）
+    hotkeySet: function () {
+      startCapture()
+      return undefined
+    },
+    hotkeyReset: function () {
+      stopCapture()
+      return host.clearHotkey()
+    },
+    // uTools 那条：只显示 + 跳过去设置（插件改不了它的绑定）
+    utoolsHotkey: function () { return host.openHotkeySetting() && host.state() },
   }
 
   document.addEventListener('click', function (e) {

@@ -305,15 +305,17 @@
     <p class="hint" id="sizeHint"></p>
     <button class="link" data-act="resetSize" id="sizeResetBtn">恢复默认</button>
 
-    <p class="group">全局快捷键</p>
+    <p class="group">全局快捷键（插件自己注册，不依赖 uTools）</p>
     <div class="size-row">
       <div class="field">
         <span>当前</span>
-        <span class="value" id="hotkeyValue">未设置</span>
+        <span class="value" id="hotkeyValue">Ctrl+Space</span>
       </div>
-      <button class="btn small" data-act="hotkey" id="hotkeyBtn">设置</button>
+      <button class="btn small" data-act="hotkeySet" id="hotkeySetBtn">改键</button>
+      <button class="btn small" data-act="hotkeyReset" id="hotkeyResetBtn">默认</button>
     </div>
     <p class="hint" id="hotkeyHint"></p>
+    <button class="link" data-act="utoolsHotkey" id="utoolsHotkeyBtn">也可以在 uTools 的快捷键设置里给「DeepSeek窗口」绑一个键</button>
   </section>
 
   <footer class="foot">

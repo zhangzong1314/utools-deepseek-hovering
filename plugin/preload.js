@@ -7,11 +7,18 @@
 const { ipcRenderer } = require('electron')
 const config = require('./js/config')
 const windows = require('./js/windows')
+const hotkey = require('./js/hotkey')
 
 // 插件里那几条"选中文字"指令的 code（plugin.json 里 declare 的）。
 // 它们进来时是带 payload 的：把选中内容丢给对话窗去问。字面量必须和 plugin.json 对上，
 // tools/check.js 有断言钉住。
 const ASK_CODES = ['ask', 'translate', 'genvarname', 'summarize', 'summarizeUrl']
+
+// 保活定时任务：uTools 会在插件退到后台几分钟后回收进程（本机设置是 3 分钟），
+// 进程一没，自己注册的全局热键和悬浮球就都跟着没了。用一个每分钟的定时任务把插件拉回来 ——
+// 官方文档写明 onScheduleTrigger 在插件未运行时也会拉起进程。
+const KEEPALIVE_CODE = 'keep-alive'
+const KEEPALIVE_CRON = '* * * * *'
 
 // 全局快捷键。uTools 不给插件"自己注册系统级快捷键"的 API，
 // 它的做法是：用户在 uTools 设置里，给 plugin.json 里声明的某条**指令**绑定一个快捷键，
@@ -44,9 +51,18 @@ function snapshot() {
     chatSize: windows.resolveChatSize(),
     chatSizeDefault: windows.DEFAULT_CHAT_SIZE,
     chatSizeMin: windows.MIN_CHAT_SIZE,
-    hotkey: currentHotkey(),
+    // 插件自己注册的全局热键（默认 Ctrl+Space，见 js/hotkey.js）
+    hotkey: hotkeySpec(),
+    hotkeyState: hotkey.state(),
+    // uTools 那边那条指令的绑定（只能显示 + 跳过去设置，插件改不了）
+    utoolsHotkey: currentHotkey(),
     hotkeyCmd: HOTKEY_CMD,
   }
+}
+
+/** 现在生效的热键：配置里存过的，没有就是默认值 */
+function hotkeySpec() {
+  return config.getHotkey() || hotkey.DEFAULT_HOTKEY
 }
 
 function emit() {
@@ -120,6 +136,46 @@ function openHotkeySetting() {
   }
 }
 
+// ---------------------------------------------------------------- 全局热键（插件自己注册）
+
+/**
+ * 保证热键助手在跑。
+ *
+ * 为什么每次进入插件都查一遍：uTools 会在插件退到后台几分钟后回收进程，进程一没，
+ * 自己注册的热键就跟着没了（那个小助手是插件的子进程）。保活定时任务会把它拉回来，
+ * 拉回来之后走的就是这里。
+ */
+function ensureHotkey() {
+  if (hotkey.isRunning()) return
+  hotkey.start(hotkeySpec())
+}
+
+/** 面板上设的新热键：存下来 + 立刻换过去（改绑 = 杀掉重开，见 js/hotkey.js 的注释） */
+function setHotkey(spec) {
+  const wanted = (spec || '').trim() || hotkey.DEFAULT_HOTKEY
+  config.setHotkey(wanted)
+  hotkey.start(wanted)
+  return snapshot()
+}
+
+function clearHotkey() {
+  config.clearHotkey()
+  hotkey.stop()
+  return snapshot()
+}
+
+/** 保活：把热键助手拉起来，顺带把该显示的悬浮球补回来 */
+function keepAliveTick() {
+  ensureHotkey()
+  if (config.isBallVisible() && !windows.getBallWindow()) {
+    try {
+      windows.showBall()
+    } catch (e) {
+      console.error('[host] 保活时补回悬浮球失败:', e)
+    }
+  }
+}
+
 function setPanelHeight(height) {
   // v8 文档与类型定义里叫 setExpandHeight；v7 时代拼作 setExpendHeight。
   // 两个都试一下，谁的机上装的是哪版都能用。
@@ -187,6 +243,9 @@ const host = {
     })
   },
   openHotkeySetting,
+  // 插件自己注册的全局热键：面板上按一下组合键就改（不依赖 uTools 的快捷键页）
+  setHotkey,
+  clearHotkey,
   // 面板上改尺寸：先夹取再落库。对话窗是 uTools 自己的浏览器窗口，改不了已经开着的那个
   // （链式 API 里没有改窗口尺寸这一步），所以新尺寸下次开窗生效 —— 面板文案是这么写的。
   setChatSize(width, height) {
@@ -310,6 +369,29 @@ function setupOnce() {
 // 而且 onPluginEnter 一定会紧随其后，放那边更稳。
 utools.onPluginReady(() => {
   setupOnce()
+
+  // 自己注册的全局热键：按一下 = 开/关对话窗（和点悬浮球一样）
+  hotkey.setFireHandler(() => {
+    toggleChatWindow()
+  })
+  hotkey.onChange(() => emit())
+  ensureHotkey()
+
+  // 保活：uTools 回收插件进程后，靠这个每分钟的定时任务把自己拉回来
+  // （官方文档写明 onScheduleTrigger 在插件未运行时也会拉起进程）。
+  try {
+    utools.requestSchedule({
+      code: KEEPALIVE_CODE,
+      label: 'DeepSeek 悬浮助手保活',
+      trigger: { cron: KEEPALIVE_CRON },
+    })
+  } catch (e) {
+    console.error('[plugin] 注册保活定时任务失败（热键和悬浮球在插件被回收后会暂时失效）:', e)
+  }
+})
+
+utools.onScheduleTrigger(() => {
+  keepAliveTick()
 })
 
 utools.onPluginEnter((action) => {
@@ -322,6 +404,8 @@ utools.onPluginEnter((action) => {
       console.error('[plugin] 显示悬浮球失败:', e)
     }
   }
+  // 热键助手是插件的子进程，进程重建之后要补回来（正常由保活定时任务兜着）
+  ensureHotkey()
   // 选中文字进来的（plugin.json 里那几条 over / regex 指令）：把文字丢给对话窗去问，
   // 这次不是来开面板的。这几条 feature 都带了 mainHide，正常不会显示主窗口。
   if (action && ASK_CODES.indexOf(action.code) !== -1) {

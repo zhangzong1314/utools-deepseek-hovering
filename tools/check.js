@@ -13,6 +13,7 @@
 // 那部分只能照 README 的验收清单人工过。
 
 const fs = require('fs')
+const os = require('os')
 const path = require('path')
 const vm = require('vm')
 const crypto = require('crypto')
@@ -312,6 +313,38 @@ function checkWiring() {
     const left = dead.filter((token) => panel.indexOf(token) !== -1)
     return left.length ? 'panel.js 里还有 ' + left.join(', ') : true
   })
+
+  check('全局热键那套接齐了（自己注册，不依赖 uTools）', () => {
+    const hotkeySrc = readPlugin('js/hotkey.js')
+
+    if (!exists(pluginFile('helper/hotkey.cs'))) return '缺 helper/hotkey.cs（热键助手的源码）'
+    const cs = readPlugin('helper/hotkey.cs')
+    for (const token of ['RegisterHotKey', 'WM_HOTKEY', 'MOD_NOREPEAT', 'Application.Run()']) {
+      if (cs.indexOf(token) === -1) return 'helper/hotkey.cs 里没有 ' + token
+    }
+
+    if (hotkeySrc.indexOf("DEFAULT_HOTKEY = 'Ctrl+Space'") === -1) return 'js/hotkey.js 的默认组合不是 Ctrl+Space'
+    for (const token of ['spawnSync', 'spawn(', "line === 'hotkey'", 'findCompiler']) {
+      if (hotkeySrc.indexOf(token) === -1) return 'js/hotkey.js 里没有 ' + token
+    }
+
+    // 面板这边：捕获按键时必须要有一个修饰键，否则会把单键从所有程序手里抢走
+    const panel = readPlugin('page/panel.js')
+    for (const token of ['startCapture', 'keyNameOf', 'metaKey', 'Ctrl']) {
+      if (panel.indexOf(token) === -1) return 'page/panel.js 里没有 ' + token
+    }
+    if (panel.indexOf('e.ctrlKey && !e.altKey && !e.shiftKey && !e.metaKey') === -1 &&
+        panel.indexOf('!e.ctrlKey && !e.altKey && !e.shiftKey && !e.metaKey') === -1) {
+      return 'page/panel.js 里没有"必须带修饰键"这条拦截'
+    }
+
+    // preload 把热键按下接到"开关对话窗"，并且注册了保活定时任务
+    if (preloadSrc.indexOf('hotkey.setFireHandler') === -1) return 'preload.js 没接热键的按下事件'
+    if (preloadSrc.indexOf('toggleChatWindow()') === -1) return 'preload.js 里热键没接到开关对话窗上'
+    if (preloadSrc.indexOf('requestSchedule') === -1) return 'preload.js 没注册保活定时任务'
+    if (preloadSrc.indexOf('onScheduleTrigger') === -1) return 'preload.js 没接保活定时任务的回调'
+    return true
+  })
 }
 
 // ---------------------------------------------------------------- 图标指纹
@@ -374,6 +407,66 @@ function createRuntime(options) {
     // 页面里 evaluate 出来的东西（假 DOM 里没有真页面，由测试按需塞：
     // inspectChat 读的那个 {url,width,height} 就从这儿来）
     probe: null,
+    // 热键助手那一侧：编译调用、拉起来的子进程、注册的定时任务
+    spawnSyncs: [],
+    children: [],
+    schedules: [],
+  }
+
+  // 假 fs：只读走真 fs（helper/hotkey.cs 是真文件），"编译产物"由假 spawnSync 标记成已存在
+  const builtExe = new Set()
+  const fakeFs = {
+    existsSync(p) {
+      if (builtExe.has(p)) return true
+      try {
+        return fs.existsSync(p)
+      } catch (e) {
+        return false
+      }
+    },
+    statSync(p) {
+      if (builtExe.has(p)) return { mtimeMs: Date.now() }
+      return fs.statSync(p)
+    },
+    mkdirSync() {},
+  }
+
+  // 假子进程：stdout 由测试手动喂，方便断言"收到 hotkey 怎么办"
+  function makeChild(exe, args) {
+    const child = {
+      exe: exe,
+      args: args || [],
+      killed: false,
+      stdinEnded: false,
+      outHandlers: [],
+      exitHandlers: [],
+      stdout: {
+        setEncoding() {},
+        on(type, fn) { if (type === 'data') child.outHandlers.push(fn) },
+      },
+      stderr: { on() {} },
+      stdin: { destroyed: false, end() { child.stdinEnded = true } },
+      kill() { child.killed = true },
+      on(type, fn) { if (type === 'exit') child.exitHandlers.push(fn) },
+      // --- 测试用的两个动作 ---
+      emitStdout(text) { child.outHandlers.forEach((fn) => fn(text)) },
+      emitExit(code) { child.exitHandlers.forEach((fn) => fn(code)) },
+    }
+    return child
+  }
+
+  const fakeChildProcess = {
+    spawnSync(exe, args) {
+      state.spawnSyncs.push({ exe: exe, args: args })
+      const out = (args || []).filter((a) => a.indexOf('-out:') === 0)[0]
+      if (out) builtExe.add(out.slice(5))
+      return { status: 0, stdout: '', stderr: '' }
+    },
+    spawn(exe, args) {
+      const child = makeChild(exe, args)
+      state.children.push(child)
+      return child
+    },
   }
 
   /** 假窗口（悬浮球用） */
@@ -501,6 +594,11 @@ function createRuntime(options) {
     getCursorScreenPoint() { return { x: 100, y: 100 } },
     getCmdHotKey() { return '' },
     redirectHotKeySetting(cmd) { state.redirected.push(cmd) },
+    requestSchedule(schedule) {
+      state.schedules.push(schedule)
+      return Promise.resolve()
+    },
+    onScheduleTrigger(fn) { state.ipc['plugin.schedule'] = fn },
     hideMainWindow() { state.hiddenMain++ },
     showMainWindow() {},
     isDev() { return false },
@@ -523,6 +621,7 @@ function createRuntime(options) {
     clearInterval: clearInterval,
     utools: utools,
     window: sandboxWindow,
+    process: process,
     navigator: { userAgent: 'Mozilla/5.0 Chrome/126.0.0.0 Electron/34.5.8 Safari/537.36' },
     document: {},
     location: { href: 'file:///plugin/index.html' },
@@ -538,6 +637,11 @@ function createRuntime(options) {
     const dir = path.dirname(abs)
     const req = (spec) => {
       if (spec === 'electron') return electron
+      // 插件自己的模块用到的那几个内置模块：能直接给真的就给真的
+      if (spec === 'fs') return fakeFs
+      if (spec === 'child_process') return fakeChildProcess
+      if (spec === 'path') return path
+      if (spec === 'os') return os
       if (spec.charAt(0) === '.') {
         return loadModule(path.resolve(dir, /\.js$/.test(spec) ? spec : spec + '.js'))
       }
@@ -556,6 +660,8 @@ function createRuntime(options) {
     state: state,
     host: sandboxWindow.deepseekHost,
     enter: (action) => state.ipc['plugin.enter'](action),
+    ready: () => state.ipc['plugin.ready'](),
+    fireSchedule: () => state.ipc['plugin.schedule']({ code: 'keep-alive' }),
     fireIpc: (channel, payload) => {
       const fn = state.ipc[channel]
       if (!fn) throw new Error('没有注册这个通道：' + channel)
@@ -757,12 +863,87 @@ function checkRuntime() {
   check('面板契约：用得上的元素都在，删掉的入口真的没了', () => {
     const html = readPlugin('index.html')
     const needed = ['chatBtn', 'ballDot', 'ballState', 'ballToggleBtn', 'sizeWidth', 'sizeHeight',
-      'sizeHint', 'hotkeyValue', 'hotkeyHint']
+      'sizeHint', 'hotkeyValue', 'hotkeyHint', 'hotkeySetBtn', 'hotkeyResetBtn', 'utoolsHotkeyBtn']
     const missing = needed.filter((id) => html.indexOf('id="' + id + '"') === -1)
     if (missing.length) return 'index.html 少了 ' + missing.join(', ')
     const gone = ['debugHint', 'devtoolsBtn', 'netlogBtn', 'tracelogBtn', 'name="openin"']
     const left = gone.filter((token) => html.indexOf(token) !== -1)
     return left.length ? 'index.html 里还剩 ' + left.join(', ') : true
+  })
+
+  check('进入插件时把热键助手拉起来（默认 Ctrl+Space）', async () => {
+    const rt = createRuntime({ callbackMode: 'async' })
+    rt.ready()
+    await rt.settle()
+    if (rt.state.spawnSyncs.length !== 1) return '没有编译热键助手（编译了 ' + rt.state.spawnSyncs.length + ' 次）'
+    const compile = rt.state.spawnSyncs[0].args.join(' ')
+    if (compile.indexOf('hotkey.cs') === -1) return '编译的不是 helper/hotkey.cs：' + compile
+    if (rt.state.children.length !== 1) return '没有把热键助手拉起来'
+    const child = rt.state.children[0]
+    if (child.args[0] !== 'Ctrl+Space') return '默认组合不是 Ctrl+Space：' + child.args[0]
+
+    child.emitStdout('ready\nok Ctrl+Space\n')
+    await rt.settle()
+    const st = rt.host.state()
+    if (st.hotkey !== 'Ctrl+Space') return '面板上显示的组合不对：' + st.hotkey
+    return st.hotkeyState.state === 'ok' ? true : '面板上的状态不对：' + JSON.stringify(st.hotkeyState)
+  })
+
+  check('按下热键 = 开关对话窗', async () => {
+    const rt = createRuntime({ callbackMode: 'async' })
+    rt.ready()
+    await rt.settle()
+    const child = rt.state.children[0]
+    child.emitStdout('ok Ctrl+Space\nhotkey\n')
+    await rt.settle()
+    if (rt.state.ubWindows.length !== 1) return '按热键没打开对话窗'
+    child.emitStdout('hotkey\n')
+    await rt.settle()
+    const hid = rt.state.chains.filter((c) => c.steps.some((s) => s.op === 'hide'))
+    return hid.length ? true : '再按一次没把对话窗收起来'
+  })
+
+  check('组合被别的程序占用时，把原因带到面板上', async () => {
+    const rt = createRuntime({ callbackMode: 'async' })
+    rt.ready()
+    await rt.settle()
+    rt.state.children[0].emitStdout('fail Ctrl+Space 注册被拒（win32 1408）\n')
+    await rt.settle()
+    const st = rt.host.state().hotkeyState
+    if (st.state !== 'fail') return '状态不是 fail：' + JSON.stringify(st)
+    return st.message.indexOf('1408') !== -1 ? true : '没把助手的话带上来：' + st.message
+  })
+
+  check('面板改键：存下来 + 把助手换成新组合（杀掉重开）', async () => {
+    const rt = createRuntime({ callbackMode: 'async' })
+    rt.ready()
+    await rt.settle()
+    const first = rt.state.children[0]
+    const next = rt.host.setHotkey('Ctrl+Alt+D')
+    await rt.settle()
+    if (next.hotkey !== 'Ctrl+Alt+D') return '面板拿到的组合不对：' + next.hotkey
+    if (rt.state.db.get('deepseek:hotkey') !== 'Ctrl+Alt+D') return '没落库'
+    if (!first.killed) return '旧助手没被杀掉（改绑是杀掉重开）'
+    if (rt.state.children.length !== 2) return '没有重新拉起助手（' + rt.state.children.length + ' 个）'
+    return rt.state.children[1].args[0] === 'Ctrl+Alt+D' ? true : '新助手用的还是旧组合：' + rt.state.children[1].args[0]
+  })
+
+  check('助手被杀之后由保活定时任务把它拉回来', async () => {
+    const rt = createRuntime({ callbackMode: 'async' })
+    rt.ready()
+    await rt.settle()
+    if (rt.state.schedules.length !== 1) return '没注册定时任务'
+    if (rt.state.schedules[0].trigger.cron !== '* * * * *') {
+      return '保活的 cron 不是每分钟：' + rt.state.schedules[0].trigger.cron
+    }
+    rt.state.children[0].emitStdout('ok Ctrl+Space\n')
+    await rt.settle()
+    rt.state.children[0].emitExit(1)
+    await rt.settle()
+    if (rt.host.state().hotkeyState.state !== 'fail') return '助手退了却没在面板上说出来'
+    rt.fireSchedule()
+    await rt.settle()
+    return rt.state.children.length === 2 ? true : '保活没把助手拉回来'
   })
 
   check('窗口创建回调同步触发时也走一遍（uTools 各版本时序不一致）', () => {

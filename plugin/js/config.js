@@ -13,6 +13,9 @@ const KEYS = {
   // uBrowser 给的窗口信息里没有"可见性"这一栏（只有 id / 地址 / 标题 / 几何），
   // 所以"显还是藏"只能插件自己记 —— 见 js/windows.js 的 isChatVisible。
   chatShown: 'deepseek:chatShown',
+  // 全局快捷键。没存过就用 js/hotkey.js 里的默认值（Ctrl+Space）——
+  // 这个键是插件自己注册的（Windows 的 RegisterHotKey），不走 uTools 的快捷键页。
+  hotkey: 'deepseek:hotkey',
 }
 
 function read(key, fallback) {
@@ -130,6 +133,24 @@ function setChatShown(shown) {
   write(KEYS.chatShown, !!shown)
 }
 
+// ---- 全局快捷键 ----
+// 存的是 "Ctrl+Space" 这样的字符串（写法见 helper/hotkey.cs 的解析）。没存过返回 null，
+// 由调用方自己决定用什么默认值 —— 默认值属于"功能"这一层，不属于配置。
+
+function getHotkey() {
+  const raw = read(KEYS.hotkey, null)
+  return typeof raw === 'string' && raw ? raw : null
+}
+
+function setHotkey(spec) {
+  if (!spec) remove(KEYS.hotkey)
+  else write(KEYS.hotkey, String(spec))
+}
+
+function clearHotkey() {
+  remove(KEYS.hotkey)
+}
+
 module.exports = {
   KEYS,
   getBallPos,
@@ -144,4 +165,7 @@ module.exports = {
   setLastChatUrl,
   isChatShown,
   setChatShown,
+  getHotkey,
+  setHotkey,
+  clearHotkey,
 }
