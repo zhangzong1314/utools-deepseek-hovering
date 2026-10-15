@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>DeepSeek 悬浮助手</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --fg: #1f2437;
+    --muted: #6b7280;
+    --line: #e8eaf0;
+    --card: #f7f8fc;
+    --brand: #4D6BFE;
+    --brand-strong: #3B54E0;
+  }
+
+  html.dark {
+    --bg: #1c1f27;
+    --fg: #e8eaf0;
+    --muted: #9aa1b1;
+    --line: #2e3340;
+    --card: #23262f;
+    --brand: #6E86FF;
+    --brand-strong: #8b9dff;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background: var(--bg);
+    color: var(--fg);
+    font: 14px/1.5 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    overflow: hidden;
+  }
+
+  .wrap {
+    height: 100%;
+    padding: 18px 20px 16px;
+    overflow: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  /* ---- 头部 ---- */
+
+  .hero {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .mark {
+    width: 42px;
+    height: 42px;
+    flex: 0 0 42px;
+    border-radius: 12px;
+    background: linear-gradient(150deg, #6E86FF 0%, #4D6BFE 45%, #3B54E0 100%);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 4px 12px rgba(77, 107, 254, .28);
+  }
+
+  .mark img { width: 26px; height: 26px; display: block; }
+
+  h1 {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 600;
+    letter-spacing: .2px;
+  }
+
+  .sub {
+    margin: 2px 0 0;
+    font-size: 12.5px;
+    color: var(--muted);
+  }
+
+  /* ---- 按钮 ---- */
+
+  .actions {
+    display: flex;
+    gap: 10px;
+  }
+
+  .btn {
+    flex: 1;
+    height: 40px;
+    padding: 0 16px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--bg);
+    color: var(--fg);
+    font: inherit;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background .12s ease, border-color .12s ease, transform .06s ease;
+  }
+
+  .btn:hover { background: var(--card); }
+
+  .btn:active { transform: scale(.985); }
+
+  .btn.primary {
+    border-color: transparent;
+    background: linear-gradient(150deg, #6E86FF 0%, #4D6BFE 55%);
+    color: #fff;
+    box-shadow: 0 4px 12px rgba(77, 107, 254, .26);
+  }
+
+  .btn.primary:hover {
+    background: linear-gradient(150deg, #6E86FF 0%, #3B54E0 55%);
+  }
+
+  .btn.small {
+    flex: 0 0 auto;
+    height: 32px;
+    padding: 0 14px;
+    font-size: 13px;
+    border-radius: 8px;
+  }
+
+  /* ---- 卡片 ---- */
+
+  .card {
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--card);
+    padding: 12px 14px;
+  }
+
+  .card-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: 500;
+  }
+
+  .card-head .title { flex: 1; }
+
+  .dot {
+    width: 8px;
+    height: 8px;
+    flex: 0 0 8px;
+    border-radius: 50%;
+    background: #c3c7d2;
+  }
+
+  .dot.on {
+    background: #22c55e;
+    box-shadow: 0 0 0 3px rgba(34, 197, 94, .16);
+  }
+
+  .hint {
+    margin-top: 8px;
+    font-size: 12.5px;
+    color: var(--muted);
+  }
+
+  .link {
+    margin-top: 10px;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--brand);
+    font: inherit;
+    font-size: 12.5px;
+    cursor: pointer;
+    text-decoration: none;
+  }
+
+  .link:hover { text-decoration: underline; }
+
+  .radio {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 10px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+
+  .radio input { accent-color: var(--brand); margin: 0; }
+
+  /* ---- 设置项分组 ---- */
+
+  .group {
+    margin: 14px 0 0;
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--muted);
+    letter-spacing: .3px;
+  }
+
+  .group:first-of-type { margin-top: 4px; }
+
+  .size-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 10px;
+  }
+
+  .field {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 1;
+    height: 32px;
+    padding: 0 10px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--bg);
+  }
+
+  /* 输入框在 uTools 里会继承一堆默认样式，逐个压掉，免得高矮不齐 */
+  .field input {
+    width: 100%;
+    min-width: 0;
+    border: 0;
+    outline: 0;
+    background: none;
+    color: var(--fg);
+    font: inherit;
+    font-size: 13px;
+    text-align: right;
+  }
+
+  .field input::placeholder { color: var(--muted); }
+
+  .field span {
+    flex: 0 0 auto;
+    font-size: 12.5px;
+    color: var(--muted);
+  }
+
+  /* 只读的"当前快捷键"取值：右对齐、等宽数字，和上面两个输入框对齐 */
+  .field .value {
+    /* 覆盖 .field span 的 flex: 0 0 auto —— 键名长了要能缩，否则会顶破输入框 */
+    flex: 1 1 auto;
+    margin-left: auto;
+    min-width: 0;
+    overflow: hidden;
+    color: var(--fg);
+    font-size: 13px;
+    text-align: right;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+
+  .field .value.none { color: var(--muted); }
+
+  .times { color: var(--muted); font-size: 12.5px; }
+
+  .foot {
+    margin-top: auto;
+    padding-top: 4px;
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--muted);
+  }
+
+  .foot b { color: var(--fg); font-weight: 500; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="hero">
+    <div class="mark">
+      <img src="assets/whale.svg" alt="" draggable="false">
+    </div>
+    <div>
+      <h1>DeepSeek 悬浮助手</h1>
+      <p class="sub">桌面悬浮球 · 官网账号登录 · 下次直接回到上次的会话</p>
+    </div>
+  </header>
+
+  <div class="actions">
+    <button class="btn primary" data-act="chat" id="chatBtn">打开对话</button>
+    <button class="btn" data-act="browser">在浏览器中打开</button>
+  </div>
+
+  <section class="card">
+    <div class="card-head">
+      <span class="dot" id="ballDot"></span>
+      <span class="title" id="ballState">悬浮球未显示</span>
+      <button class="btn small" data-act="ballToggle" id="ballToggleBtn">显示悬浮球</button>
+    </div>
+    <p class="hint">左键单击打开对话（再点一下关掉），按住可拖动换位置，右键弹出菜单。</p>
+    <button class="link" data-act="resetPos">悬浮球不见了或跑到屏幕外？点这里放回右下角</button>
+  </section>
+
+  <section class="card">
+    <div class="card-head"><span class="title">设置</span></div>
+
+    <p class="group">单击悬浮球时</p>
+    <label class="radio">
+      <input type="radio" name="openin" value="window">
+      <span>在内置独立窗口打开（推荐，登录态与浏览器互不影响）</span>
+    </label>
+    <label class="radio">
+      <input type="radio" name="openin" value="browser">
+      <span>在系统默认浏览器打开</span>
+    </label>
+
+    <p class="group">对话窗大小</p>
+    <div class="size-row">
+      <label class="field">
+        <span>宽</span>
+        <input type="number" id="sizeWidth" data-size="width" inputmode="numeric" step="10" placeholder="460">
+      </label>
+      <span class="times">×</span>
+      <label class="field">
+        <span>高</span>
+        <input type="number" id="sizeHeight" data-size="height" inputmode="numeric" step="10" placeholder="900">
+      </label>
+      <button class="btn small" data-act="applySize" id="sizeApplyBtn">应用</button>
+    </div>
+    <p class="hint" id="sizeHint"></p>
+    <button class="link" data-act="resetSize" id="sizeResetBtn">恢复默认</button>
+
+    <p class="group">全局快捷键</p>
+    <div class="size-row">
+      <div class="field">
+        <span>当前</span>
+        <span class="value" id="hotkeyValue">未设置</span>
+      </div>
+      <button class="btn small" data-act="hotkey" id="hotkeyBtn">设置</button>
+    </div>
+    <p class="hint" id="hotkeyHint"></p>
+  </section>
+
+  <section class="card">
+    <div class="card-head"><span class="title">排查</span></div>
+    <p class="group">对话窗里的请求出问题时（比如登录提示"网络异常"）</p>
+    <div class="size-row">
+      <button class="btn small" data-act="devtools" id="devtoolsBtn">打开对话窗开发者工具</button>
+      <button class="btn small" data-act="netlog" id="netlogBtn">复制失败请求记录</button>
+      <button class="btn small" data-act="tracelog" id="tracelogBtn">复制排查日志</button>
+    </div>
+    <p class="hint" id="debugHint">「开发者工具」最直接：Network 那一栏里红色的就是没成的请求。
+      「复制失败请求记录」取的是插件自己在对话窗里记下的失败清单（XHR / fetch / WebSocket），
+      「复制排查日志」取的是整个日志文件的尾巴 —— 里面有浏览器自己说的那句
+      <code>Failed to load resource: net::ERR_…</code>，它直接点名是谁把请求掐掉的。
+      复制完直接发出来就行。</p>
+  </section>
+
+  <footer class="foot">
+    悬浮球靠插件进程存活。<b>uTools 主窗口隐藏后，插件默认会在几分钟内被回收</b>，悬浮球也会一起消失 ——
+    重新在 uTools 里搜一次「deepseek」回车即可召回，或在 uTools 设置里关闭插件的自动结束。
+  </footer>
+</div>
+<script src="page/panel.js"></script>
+</body>
+</html>

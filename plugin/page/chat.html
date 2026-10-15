@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>DeepSeek</title>
+<style>
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background: #fff;
+    color: #1f2437;
+    font: 14px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    overflow: hidden;
+  }
+
+  .box {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    padding: 24px;
+    text-align: center;
+  }
+
+  .mark {
+    width: 56px;
+    height: 56px;
+    border-radius: 16px;
+    background: linear-gradient(150deg, #6E86FF 0%, #4D6BFE 45%, #3B54E0 100%);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 6px 20px rgba(77, 107, 254, .3);
+    animation: pulse 1.6s ease-in-out infinite;
+  }
+
+  .mark img { width: 32px; height: 32px; display: block; }
+
+  @keyframes pulse {
+    0%, 100% { transform: scale(1); opacity: 1; }
+    50%      { transform: scale(.94); opacity: .78; }
+  }
+
+  h1 {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+  }
+
+  p {
+    margin: 0;
+    font-size: 13px;
+    color: #6b7280;
+  }
+
+  .actions {
+    display: none;
+    flex-direction: column;
+    gap: 10px;
+    width: 100%;
+    max-width: 280px;
+    margin-top: 4px;
+  }
+
+  .actions.show { display: flex; }
+
+  button {
+    height: 40px;
+    border: 1px solid #e8eaf0;
+    border-radius: 10px;
+    background: #fff;
+    color: #1f2437;
+    font: inherit;
+    font-weight: 500;
+    cursor: pointer;
+  }
+
+  button:hover { background: #f7f8fc; }
+
+  button.primary {
+    border-color: transparent;
+    background: linear-gradient(150deg, #6E86FF 0%, #4D6BFE 55%);
+    color: #fff;
+  }
+
+  button.primary:hover { background: linear-gradient(150deg, #6E86FF 0%, #3B54E0 55%); }
+</style>
+</head>
+<body>
+  <!--
+    这个页面负责把自己送到官网去。
+
+    父窗（preload.js → js/windows.js）做不到这件事：createBrowserWindow 的第一个参数
+    只收插件目录内的本地路径，而它返回的窗口实例上没有 loadURL（实测 uTools 8.0.0：
+    "win.loadURL is not a function"）。好在窗口里的顶层导航是浏览器原生行为，
+    一句 location.replace 就够，不需要任何 uTools API。
+
+    真的跳不过去（断网、被策略拦下）时，页面会留在原地并显示下面的兜底界面。
+  -->
+  <div class="box">
+    <div class="mark">
+      <img src="../assets/whale.svg" alt="" draggable="false">
+    </div>
+    <h1 id="title">正在打开 DeepSeek…</h1>
+    <p id="sub">首次使用请用官网账号（手机号 / 邮箱 / 微信）登录</p>
+    <div class="actions" id="actions">
+      <button class="primary" id="retry">重试</button>
+      <button id="browser">在系统浏览器中打开</button>
+    </div>
+  </div>
+
+<script>
+(function () {
+  'use strict'
+
+  var SITE = 'https://chat.deepseek.com/'
+
+  // 该跳哪儿由 chat-preload.js 决定：它读出上次的会话地址挂在 window.chatHost 上。
+  // 没有（首次使用 / 存储被清）就是官网首页，DeepSeek 自己会落到新对话。
+  var target = SITE
+  try {
+    if (window.chatHost && typeof window.chatHost.target === 'string' && window.chatHost.target) {
+      target = window.chatHost.target
+    }
+  } catch (e) {
+    console.error('[chat] 读取目标地址失败，改用首页:', e)
+  }
+
+  var title = document.getElementById('title')
+  var sub = document.getElementById('sub')
+  var actions = document.getElementById('actions')
+
+  function stuck() {
+    title.textContent = '没能打开 DeepSeek'
+    sub.textContent = '可能是网络不通或被拦截，重试一下，或改用系统浏览器打开。'
+    actions.classList.add('show')
+  }
+
+  // 先把兜底计时器挂上，再跳转：跳转成功的话这个页面连同定时器一起被卸载，
+  // 定时器根本没机会跑；2.5 秒后还留在本页，说明确实没跳过去。
+  //
+  // 判断"还在本页"用域名而不是 location.protocol === 'file:' ——
+  // uTools 有可能通过自定义协议来喂本地页面，那时 protocol 不是 file:。
+  setTimeout(function () {
+    if (location.href.indexOf('deepseek.com') === -1) stuck()
+  }, 2500)
+
+  // 用 replace 而不是赋值 href：别让窗口的历史里留下这个中转页，
+  // 否则用户按后退会退回到"正在打开…"。
+  location.replace(target)
+
+  document.getElementById('retry').addEventListener('click', function () {
+    location.replace(target)
+  })
+
+  document.getElementById('browser').addEventListener('click', function () {
+    try {
+      if (window.utools && utools.shellOpenExternal) {
+        // 这里开首页而不是 target：会话地址直接甩给系统浏览器也行，
+        // 但浏览器里未必是登录态，落到首页更不容易吓人一跳。
+        utools.shellOpenExternal(target)
+        return
+      }
+    } catch (e) {
+      console.error('[chat] shellOpenExternal 不可用:', e)
+    }
+    // 连 uTools 的 API 都没拿到时，至少还能靠页面自己跳出去
+    window.open(target, '_blank')
+  })
+})()
+</script>
+</body>
+</html>

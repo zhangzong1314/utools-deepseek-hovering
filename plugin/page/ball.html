@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>DeepSeek</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: transparent;
+    /* 悬浮球是桌面上的一个"物件"，不该有网页的选中/拖拽行为 */
+    user-select: none;
+    -webkit-user-select: none;
+    cursor: default;
+  }
+
+  /* 球的位置由 JS 控制：菜单没开时是 (0,0)，菜单开时窗口被撑大，
+     球要挪到窗口内对应的位置去。 */
+  #stage {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 60px;
+    height: 60px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  #ball {
+    position: relative;
+    width: 52px;
+    height: 52px;
+    border-radius: 50%;
+    background: linear-gradient(150deg, #6E86FF 0%, #4D6BFE 45%, #3B54E0 100%);
+    box-shadow: 0 2px 8px rgba(38, 58, 150, 0.38);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: grab;
+    /* 入场用弹性曲线；默认是缩到 0 的隐藏态，等 shown 之后再弹出来 */
+    transform: scale(0);
+    opacity: 0;
+    transition: transform .3s cubic-bezier(.34, 1.56, .64, 1), opacity .18s ease;
+    will-change: transform;
+  }
+
+  html.shown #ball {
+    transform: scale(1);
+    opacity: 1;
+  }
+
+  html.shown #ball:hover {
+    transform: scale(1.06);
+    box-shadow: 0 3px 12px rgba(38, 58, 150, 0.45);
+  }
+
+  html.shown #ball.dragging {
+    transform: scale(.94);
+    cursor: grabbing;
+    transition: transform .12s ease;
+  }
+
+  #ball img {
+    /* 官网那条鲸鱼是横长的（宽高比约 1.4:1），定宽不显得小 */
+    width: 34px;
+    height: 34px;
+    display: block;
+    /* 图标不参与指针判定，否则 mousedown 的 target 会是 img 而不是球 */
+    pointer-events: none;
+    /* 拖球时别让浏览器插一脚原生图片拖拽 */
+    -webkit-user-drag: none;
+  }
+
+  #menu {
+    position: absolute;
+    display: none;
+    box-sizing: border-box;
+    padding: 8px 0;
+    background: #ffffff;
+    border-radius: 10px;
+    box-shadow: 0 8px 28px rgba(15, 25, 60, 0.3), 0 1px 3px rgba(15, 25, 60, 0.18);
+    overflow: hidden;
+  }
+
+  #menu.open {
+    display: block;
+  }
+
+  #menu button {
+    display: block;
+    width: 100%;
+    height: 34px;
+    padding: 0 14px;
+    box-sizing: border-box;
+    border: 0;
+    background: transparent;
+    font: 13px/34px -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    color: #1f2437;
+    text-align: left;
+    white-space: nowrap;
+    cursor: default;
+  }
+
+  #menu button:hover {
+    background: #f0f3ff;
+    color: #3B54E0;
+  }
+
+  #menu button.danger:hover {
+    background: #fff1f1;
+    color: #c93a3a;
+  }
+</style>
+</head>
+<body>
+  <div id="stage">
+    <div id="ball">
+      <!-- 官网图标（https://fe-static.deepseek.com/chat/favicon.svg 的鲸鱼路径），
+           白色版存在 ../assets/whale.svg；logo.png 也由同一条路径生成，改一处两处都变 -->
+      <img src="../assets/whale.svg" alt="" draggable="false">
+    </div>
+  </div>
+  <div id="menu" role="menu"></div>
+
+<script>
+(function () {
+  'use strict'
+
+  var host = window.ballHost
+  var root = document.documentElement
+  var stage = document.getElementById('stage')
+  var ball = document.getElementById('ball')
+  var menu = document.getElementById('menu')
+
+  // 鼠标移动多少像素以内算"点击"而不是"拖拽"。
+  // 不用 CSS 的 -webkit-app-region: drag 就是因为拖拽区不再派发鼠标事件，
+  // 那样同一个球就没法既响应点击又响应拖拽了。
+  var CLICK_SLOP = 4
+
+  var drag = null
+  var menuOpen = false
+
+  function send(channel, payload) {
+    if (!host || typeof host.send !== 'function') return
+    try {
+      host.send(channel, payload)
+    } catch (e) {
+      console.error('[ball] 发送 ' + channel + ' 失败:', e)
+    }
+  }
+
+  // ---- 入场 ----
+  function show() {
+    root.classList.add('shown')
+  }
+  // 自己到点就弹出来，不等父窗通知。父窗那条 ball:shown 是在窗口 show() 之后发的，
+  // 但实测 uTools 的 createBrowserWindow 回调可能在页面还没加载完时同步触发，
+  // 那时消息发得比这里的监听还早，收不到 —— 等着它就会白等。收到通知再补一次也无害。
+  //
+  // 延一帧再触发，是让浏览器先把 #ball 的初始态(scale 0)算出来，
+  // 否则同一帧内改类名会把过渡动画吃掉，球直接蹦出来。
+  setTimeout(show, 16)
+
+  // ---- 光标位置 ----
+  // 优先问 uTools 要屏幕坐标：拖拽时窗口跟着光标跑，一旦光标冲出窗口，
+  // mousemove 就不再触发，只有主动轮询才能把快速甩动跟住。
+  function cursorPoint() {
+    if (!host || typeof host.cursorPoint !== 'function') return null
+    try {
+      var p = host.cursorPoint()
+      return p && typeof p.x === 'number' && typeof p.y === 'number' ? p : null
+    } catch (e) {
+      return null
+    }
+  }
+
+  function applyDelta(dx, dy) {
+    if (!drag) return
+    if (!drag.moved) {
+      if (Math.abs(dx) <= CLICK_SLOP && Math.abs(dy) <= CLICK_SLOP) return
+      drag.moved = true
+      ball.classList.add('dragging')
+      send('ball:dragStart', null)
+    }
+    // 轮询是每帧都在跑的，光标没动就别发消息，省得白占 IPC
+    if (drag.dx === dx && drag.dy === dy) return
+    drag.dx = dx
+    drag.dy = dy
+    send('ball:drag', { dx: dx, dy: dy })
+  }
+
+  function tick() {
+    if (!drag) return
+    var p = cursorPoint()
+    if (p) applyDelta(p.x - drag.start.x, p.y - drag.start.y)
+    drag.raf = window.requestAnimationFrame(tick)
+  }
+
+  function onMove(e) {
+    if (!drag || drag.polling) return
+    // 没有取屏幕坐标的 API 时的退路：用事件自带的屏幕坐标算位移
+    applyDelta(e.screenX - drag.start.x, e.screenY - drag.start.y)
+  }
+
+  function onUp(e) {
+    if (!drag) return
+    var moved = drag.moved
+    if (drag.raf) window.cancelAnimationFrame(drag.raf)
+    document.removeEventListener('mousemove', onMove)
+    document.removeEventListener('mouseup', onUp)
+    drag = null
+    ball.classList.remove('dragging')
+    if (moved) {
+      send('ball:dragEnd', null)
+      return
+    }
+    // 没动过才算点击，而且松手必须落在球本身上（球上还有 img 子元素，用 contains 判）
+    if (e && e.target && ball.contains(e.target)) send('ball:click', null)
+  }
+
+  ball.addEventListener('mousedown', function (e) {
+    if (e.button !== 0) return
+    e.preventDefault()
+    if (menuOpen) closeMenu()
+
+    var p = cursorPoint()
+    drag = {
+      start: p || { x: e.screenX, y: e.screenY },
+      polling: !!p,
+      moved: false,
+      dx: 0,
+      dy: 0,
+      raf: 0,
+    }
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
+    if (drag.polling) drag.raf = window.requestAnimationFrame(tick)
+  })
+
+  // ---- 右键菜单 ----
+  // 菜单是画在这个窗口里的（球窗会被父窗临时撑大来容纳它），
+  // 不是系统原生菜单 —— uTools 没给自定义窗口留原生菜单的接口。
+  function resetMenuUI() {
+    menuOpen = false
+    menu.classList.remove('open')
+    menu.innerHTML = ''
+    stage.style.left = '0px'
+    stage.style.top = '0px'
+  }
+
+  function closeMenu() {
+    if (!menuOpen) return
+    resetMenuUI()
+    send('ball:menuClose', null)
+  }
+
+  function openMenu(data) {
+    if (!data || !data.geom) return
+    var g = data.geom
+    stage.style.left = g.ball.x + 'px'
+    stage.style.top = g.ball.y + 'px'
+    menu.style.left = g.menu.x + 'px'
+    menu.style.top = g.menu.y + 'px'
+    menu.style.width = g.menu.width + 'px'
+    menu.style.height = g.menu.height + 'px'
+    menu.innerHTML = ''
+
+    var items = data.items || []
+    items.forEach(function (item) {
+      var btn = document.createElement('button')
+      btn.type = 'button'
+      btn.textContent = item.label
+      if (item.id === 'hide') btn.className = 'danger'
+      btn.addEventListener('click', function () {
+        resetMenuUI()
+        send('ball:menuPick', item.id)
+      })
+      menu.appendChild(btn)
+    })
+
+    menuOpen = true
+    menu.classList.add('open')
+  }
+
+  ball.addEventListener('contextmenu', function (e) {
+    e.preventDefault()
+    if (menuOpen) {
+      closeMenu()
+      return
+    }
+    send('ball:requestMenu', null)
+  })
+
+  // 窗口内任意处按下（菜单项除外）都关菜单；窗口因为失焦而收不到这次 mousedown 时，
+  // 还有下面的 blur 兜底。
+  document.addEventListener('mousedown', function (e) {
+    if (!menuOpen) return
+    if (menu.contains(e.target)) return
+    if (ball.contains(e.target)) return
+    closeMenu()
+  }, true)
+
+  // 点到了别的应用上：父窗开菜单时会 focus 球窗，所以这里能收到 blur。
+  window.addEventListener('blur', function () {
+    closeMenu()
+  })
+
+  // 右键菜单在别处弹出时，别让 Chromium 自己的菜单再插一脚
+  document.addEventListener('contextmenu', function (e) {
+    e.preventDefault()
+  })
+
+  if (host) {
+    host.shown(show)
+    host.menu(openMenu)
+    host.menuClose(resetMenuUI)
+  }
+})()
+</script>
+</body>
+</html>

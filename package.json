@@ -1,0 +1,10 @@
+{
+  "name": "deepseek-hovering",
+  "version": "1.0.0",
+  "private": true,
+  "description": "uTools 插件：DeepSeek 桌面悬浮助手",
+  "scripts": {
+    "icons": "node tools/gen-icons.js",
+    "check": "node tools/check.js"
+  }
+}

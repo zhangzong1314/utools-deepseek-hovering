@@ -1,0 +1,37 @@
+{
+  "pluginName": "DeepSeek 悬浮助手",
+  "version": "1.0.0",
+  "description": "桌面悬浮球：单击打开 DeepSeek 官网对话，使用官网账号登录，并记住上次的会话",
+  "author": "zhanghui",
+  "main": "index.html",
+  "logo": "assets/logo.png",
+  "preload": "preload.js",
+  "pluginSetting": {
+    "height": 680
+  },
+  "features": [
+    {
+      "code": "deepseek",
+      "description": "DeepSeek 悬浮助手：打开官网对话 / 显示桌面悬浮球",
+      "explain": "DeepSeek 悬浮助手：打开官网对话 / 显示桌面悬浮球",
+      "icon": "assets/logo.png",
+      "cmds": [
+        "deepseek",
+        "ds",
+        "深度求索",
+        "ai对话",
+        "悬浮球"
+      ]
+    },
+    {
+      "code": "deepseek-window",
+      "description": "打开/关闭 DeepSeek 对话窗（可在 uTools 全局快捷键里绑定按键）",
+      "explain": "打开/关闭 DeepSeek 对话窗",
+      "icon": "assets/logo.png",
+      "mainHide": true,
+      "cmds": [
+        "DeepSeek窗口"
+      ]
+    }
+  ]
+}
