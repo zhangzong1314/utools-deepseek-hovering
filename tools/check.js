@@ -191,9 +191,6 @@ function checkWiring() {
   const preloadSrc = readPlugin('preload.js')
   const windowsSrc = readPlugin('js/windows.js')
   const configSrc = readPlugin('js/config.js')
-  const chatHtml = readPlugin('page/chat.html')
-  const chatHost = readPlugin('page/chat-host.js')
-  const chatPreload = readPlugin('page/chat-preload.js')
 
   check('preload 的 HOTKEY_FEATURE/HOTKEY_CMD 指向 plugin.json 里那条 mainHide 指令', () => {
     const code = (preloadSrc.match(/HOTKEY_FEATURE\s*=\s*'([^']+)'/) || [])[1]
@@ -225,74 +222,54 @@ function checkWiring() {
     (preloadSrc.indexOf('ASK_CODES.indexOf(action.code)') !== -1 ? true : '没看到提问的分派') &&
     (preloadSrc.indexOf('action.code === HOTKEY_FEATURE') !== -1 ? true : '没看到快捷键的分派'))
 
-  check('windows.openChat 建的是 webview 宿主页，且开了 webviewTag / webSecurity', () => {
-    const from = windowsSrc.indexOf('function openChat')
-    const body = windowsSrc.slice(from, windowsSrc.indexOf('function toggleChat'))
-    if (body.indexOf("createBrowserWindow('page/chat.html'") === -1) return 'openChat 没建 page/chat.html'
-    if (body.indexOf('webviewTag: true') === -1) return 'openChat 少了 webviewTag: true'
-    if (body.indexOf('webSecurity: false') === -1) return 'openChat 少了 webSecurity: false'
-    if (body.indexOf("preload: 'page/chat-preload.js'") === -1) return 'openChat 少了宿主页的 preload'
+  check('对话窗走的是 uTools 自带的浏览器（utools.ubrowser）', () => {
+    const need = [
+      ['utools.ubrowser', '对话窗要由 uTools 的浏览器来开'],
+      ['getIdleUBrowsers', '窗口在不在只能问它'],
+      ['wait(SEL_INPUT', '要等官网界面出来'],
+      ['paste(', '把文字送进输入框'],
+      ['click(SEL_SEND)', '点发送按钮'],
+      ['PREFIX', '划词指令的引子'],
+    ]
+    const missing = need.filter((p) => windowsSrc.indexOf(p[0]) === -1).map((p) => p[0] + '（' + p[1] + '）')
+    if (missing.length) return 'windows.js 里缺：' + missing.join('、')
+    if (windowsSrc.indexOf("createBrowserWindow('page/chat.html'") !== -1) {
+      return '对话窗还在拿自建窗口装页面 —— 那个窗口里装不了官网（见 README 的已知限制）'
+    }
     return true
   })
 
-  check('宿主页的站点常量与父窗认可会话的域名一致', () => {
-    // 会话地址的判定在 windows.js 的正则里，打开哪个站点在宿主页的 SITE 上 ——
-    // 这两处必须指同一个域名，否则就成了"记得住、但下次开到别的地方去"。
-    const site = (chatHost.match(/var SITE\s*=\s*'([^']+)'/) || [])[1]
-    if (!site) return '宿主页里找不到 SITE'
+  check('对话窗的宿主页文件已经删干净', () => {
+    const gone = ['page/chat.html', 'page/chat-host.js', 'page/chat-preload.js']
+    const left = gone.filter((p) => exists(pluginFile(p)))
+    return left.length ? '这些文件还在：' + left.join(', ') : true
+  })
+
+  check('SITE 与"认可会话地址"的域名一致', () => {
+    const site = (windowsSrc.match(/const SITE\s*=\s*'([^']+)'/) || [])[1]
+    if (!site) return 'windows.js 里找不到 SITE'
     // 取整行里最后那个 / —— 正则里全是转义的 \/，不能用它当结束标记
     const re = (windowsSrc.match(/CONVERSATION_RE\s*=\s*(\/[^\n]*\/)/) || [])[1]
     if (!re) return 'windows.js 里找不到 CONVERSATION_RE'
     const host = site.replace(/^https:\/\//, '').replace(/\/$/, '').replace(/\./g, '\\.')
-    return re.indexOf(host) !== -1 ? true : '宿主页开的是 ' + site + '，父窗认的却是 ' + re
+    return re.indexOf(host) !== -1 ? true : 'SITE=' + site + '，但认会话地址的正则是 ' + re
   })
 
-  check('存储键只在 js/config.js 里定义（页面侧不自己写键名）', () => {
-    const keys = ['deepseek:lastChatUrl', 'deepseek:userToken', 'deepseek:chatSize', 'deepseek:ballPos']
-    const offenders = []
-    for (const key of keys) {
-      if (configSrc.indexOf(key) === -1) offenders.push('config.js 里没有 ' + key)
-      for (const pair of [['page/chat-host.js', chatHost], ['page/chat-preload.js', chatPreload]]) {
-        if (pair[1].indexOf(key) !== -1) offenders.push(pair[0] + ' 里出现了字面量 ' + key)
-      }
-    }
-    return offenders.length ? offenders.join('；') : true
+  check('存储键只在 js/config.js 里定义', () => {
+    const keys = ['deepseek:lastChatUrl', 'deepseek:chatSize', 'deepseek:ballPos', 'deepseek:chatShown']
+    const missing = keys.filter((key) => configSrc.indexOf(key) === -1)
+    return missing.length ? 'config.js 里没有 ' + missing.join(', ') : true
   })
 
-  check('宿主页的存储访问一律走 chatHost（不碰 utools 全局）', () => {
-    if (/utools\s*\./.test(chatHost)) return 'page/chat-host.js 里直接用了 utools'
-    return chatPreload.indexOf("require('../js/config')") !== -1 ? true : 'preload 没复用 js/config'
-  })
-
-  check('chat.html 是 webview 宿主（没有顶层导航）', () => {
-    if (chatHtml.indexOf('<webview') === -1) return 'chat.html 里没有 <webview>'
-    if (chatHtml.indexOf('location.replace(') !== -1) return 'chat.html 里还有 location.replace（旧的顶层导航）'
-    if (chatHtml.indexOf('chat-host.js') === -1) return 'chat.html 没引页面脚本'
-    return true
-  })
-
-  check('宿主页的几处关键接线都在', () => {
-    const need = [
-      ['window.dsChat', '父窗靠这个入口递提问'],
-      ["setAttribute('userAgent'", 'UA 要设给 webview'],
-      ['/ Electron\\/.*? /i', 'UA 里的 Electron 标记要去掉'],
-      ['did-stop-loading', '加载完要知道'],
-      ['did-navigate-in-page', 'SPA 切会话要走这条'],
-      ['did-fail-load', '失败了要显兜底'],
-      ['errorCode === -3', 'ERR_ABORTED 不能当失败'],
-      ['chat:url', '地址要回报父窗'],
-      ['chat:size', '尺寸要回报父窗'],
-    ]
-    const missing = need
-      .filter((pair) => chatHost.indexOf(pair[0]) === -1)
-      .map((pair) => pair[0] + '（' + pair[1] + '）')
-    return missing.length ? '缺：' + missing.join('、') : true
-  })
+  check('config 里有"对话窗显/藏"这个键（uBrowser 不给可见性，只能自己记）', () =>
+    configSrc.indexOf('function isChatShown') !== -1 && configSrc.indexOf('function setChatShown') !== -1
+      ? true
+      : 'config.js 里没有 isChatShown/setChatShown')
 
   check('JS 侧没有旧机制的残留', () => {
-    const dead = ['chat:sri', 'chat:netfail', 'chat:trace', 'chat:nodeRepair', 'repairChat',
-      'watchViaSession', 'watchViaDebugger', 'watchChatConsole', 'collectChatDiagnostics',
-      'openChatDevTools', '__dsHelper', 'reloadChatIgnoringCache', '_sri-ck']
+    const dead = ['chat:sri', 'chat:netfail', 'chat:trace', 'chat:nodeRepair', 'chat:url', 'chat:size',
+      'repairChat', 'watchViaSession', 'watchViaDebugger', 'watchChatConsole', 'collectChatDiagnostics',
+      'openChatDevTools', '__dsHelper', 'dsChat', 'chatHost', 'reloadChatIgnoringCache', '_sri-ck']
     const offenders = []
     for (const file of files.filter((f) => /\.(js|html)$/.test(f))) {
       const src = readFile(file)
@@ -361,13 +338,16 @@ function createRuntime(options) {
     created: [],
     ipc: {},
     db: new Map(),
-    jsQueue: (opts.jsQueue || []).slice(),
-    jsCalls: [],
     hiddenMain: 0,
     redirected: [],
     pendingCallbacks: [],
+    // uBrowser 那一侧：每次 run() 记一条链，造出来的窗口也记着
+    chains: [],
+    ubWindows: [],
+    nextWinId: 0,
   }
 
+  /** 假窗口（悬浮球用） */
   function makeWindow(url, winOpts) {
     const o = winOpts || {}
     const win = {
@@ -403,17 +383,58 @@ function createRuntime(options) {
       setAlwaysOnTop() {},
       on() {},
       webContents: {
-        executeJavaScript(code) {
-          state.jsCalls.push(code)
-          const next = state.jsQueue.length ? state.jsQueue.shift() : true
-          return Promise.resolve(next)
-        },
+        executeJavaScript() { return Promise.resolve(true) },
         send(channel, payload) { win.sent.push({ channel: channel, payload: payload }) },
         on() {},
         openDevTools() {},
       },
     }
     return win
+  }
+
+  const UB_METHODS = ['goto', 'show', 'hide', 'wait', 'focus', 'paste', 'click', 'evaluate',
+    'userAgent', 'devTools', 'css', 'press', 'input', 'check', 'scroll', 'clearCookies']
+
+  /** 假的链式 uBrowser：每一步都记下来，run() 时把整条链收进 state.chains */
+  function makeChain(steps) {
+    const chain = {}
+    UB_METHODS.forEach((name) => {
+      chain[name] = function () {
+        steps.push({ op: name, args: Array.prototype.slice.call(arguments) })
+        return chain
+      }
+    })
+    chain.run = function (target) {
+      const record = { steps: steps.slice(), target: target }
+      state.chains.push(record)
+
+      if (typeof target === 'number') {
+        const win = state.ubWindows.filter((w) => w.id === target)[0]
+        if (!win) return Promise.reject(new Error('uBrowser 窗口已经不在了'))
+        if (record.steps.some((s) => s.op === 'hide')) win.shown = false
+        if (record.steps.some((s) => s.op === 'show')) win.shown = true
+        const results = record.steps.map(() => undefined)
+        return Promise.resolve(results.concat([win]))
+      }
+
+      const winOpts = target || {}
+      const goto = record.steps.filter((s) => s.op === 'goto').slice(-1)[0]
+      const win = {
+        id: ++state.nextWinId,
+        url: goto ? goto.args[0] : '',
+        title: winOpts.title || '',
+        width: winOpts.width || 800,
+        height: winOpts.height || 600,
+        x: 0,
+        y: 0,
+        shown: true,
+        options: winOpts,
+      }
+      state.ubWindows.push(win)
+      const results = record.steps.map(() => undefined)
+      return Promise.resolve(results.concat([win]))
+    }
+    return chain
   }
 
   const utools = {
@@ -428,6 +449,15 @@ function createRuntime(options) {
         else state.pendingCallbacks.push(() => cb(win))
       }
       return win
+    },
+    ubrowser: makeChain([]),
+    getIdleUBrowsers() {
+      // "空闲"= 操作队列跑完了；桩件里没有并发，所以创建过的都算空闲（藏着的也算 ——
+      // uTools 那个列表同样不带可见性）
+      return state.ubWindows.map((w) => ({
+        id: w.id, url: w.url, title: w.title,
+        width: w.width, height: w.height, x: w.x, y: w.y,
+      }))
     },
     dbStorage: {
       getItem(k) { return state.db.has(k) ? state.db.get(k) : null },
@@ -499,6 +529,7 @@ function createRuntime(options) {
       if (!fn) throw new Error('没有注册这个通道：' + channel)
       return fn({}, payload)
     },
+    settle: () => new Promise((ok) => setTimeout(ok, 0)),
     flush: () => {
       const list = state.pendingCallbacks.slice()
       state.pendingCallbacks.length = 0
@@ -524,111 +555,155 @@ function checkRuntime() {
     return true
   })
 
-  check('点悬浮球：第一次开窗（参数齐全），第二次收起来（hide 而不是销毁）', () => {
+  check('点悬浮球：第一次开对话窗（尺寸来自配置），第二次藏起来（hide，窗口还在）', async () => {
     const rt = createRuntime({ callbackMode: 'async' })
     rt.enter({ code: 'deepseek', type: 'text' })
     rt.fireIpc('ball:click')
-    const chats = rt.windowByUrl('page/chat.html')
-    if (chats.length !== 1) return '点球没开出对话窗'
-    const chat = chats[0]
-    const wp = chat.options.webPreferences || {}
-    if (wp.webviewTag !== true) return 'webPreferences 里没有 webviewTag'
-    if (wp.webSecurity !== false) return 'webPreferences 里没有 webSecurity:false'
-    if (wp.preload !== 'page/chat-preload.js') return '宿主页的 preload 不对：' + wp.preload
-    if (chat.options.minWidth !== 320 || chat.options.minHeight !== 400) return '最小尺寸没设'
+    await rt.settle()
+    const wins = rt.state.ubWindows
+    if (wins.length !== 1) return '点球没开出对话窗（uBrowser 窗口数 ' + wins.length + '）'
+    const win = wins[0]
+    if (win.width !== 460 || win.height !== 900) {
+      return '窗口尺寸不是配置里的默认值：' + win.width + '×' + win.height
+    }
+    if (win.url !== SITE) return '没有记住的会话时该开到官网首页，实际是 ' + win.url
     if (rt.state.hiddenMain === 0) return '开窗时没把 uTools 主窗口收起来'
+    if (rt.host.state().chatOpen !== true) return '面板读到的状态是"没开"'
 
     rt.fireIpc('ball:click')
-    if (chat.hideCalls !== 1) return '第二次点球没有 hide（hideCalls=' + chat.hideCalls + '）'
-    if (chat.destroyed) return '第二次点球把窗口销毁了 —— 关窗要 hide 复用'
+    await rt.settle()
+    const hid = rt.state.chains.filter((c) => c.steps.some((s) => s.op === 'hide'))
+    if (!hid.length) return '第二次点球没有走 hide（uBrowser 里"关闭"就是 hide）'
+    if (rt.state.ubWindows.length !== 1) return '第二次点球又开了一个窗口'
+    if (rt.host.state().chatOpen !== false) return '藏起来之后面板还当成开着'
 
     rt.fireIpc('ball:click')
-    if (!chat.visible) return '第三次点球没把窗口再显示出来'
+    await rt.settle()
+    const shown = rt.state.chains.filter((c) => c.steps.some((s) => s.op === 'show'))
+    if (shown.length < 2) return '第三次点球没把窗口再摆出来'
     return true
   })
 
-  check('选中文字提问：把 code/payload 递进宿主页的 window.dsChat', () => {
+  check('选中文字提问：等界面 → 处理在途生成 → 贴文字 → 点发送', async () => {
     const rt = createRuntime({ callbackMode: 'async' })
     rt.enter({ code: 'translate', payload: 'hello world', type: 'over' })
-    rt.flush()
-    if (!rt.state.jsCalls.length) return '没有向窗口注入任何东西'
-    const injected = rt.state.jsCalls[0]
-    if (injected.indexOf('window.dsChat') === -1) return '注入的不是宿主页的入口：' + injected
-    if (injected.indexOf('"code":"translate"') === -1) return '注入串里没有 code'
-    if (injected.indexOf('"payload":"hello world"') === -1) return '注入串里没有 payload'
-    const chat = rt.windowByUrl('page/chat.html')[0]
-    if (!chat || !chat.visible) return '提问时没把对话窗摆出来'
+    await rt.settle()
+    const chain = rt.state.chains.filter((c) => c.steps.some((s) => s.op === 'paste')).slice(-1)[0]
+    if (!chain) return '没有把文字送进对话窗（没见过 paste 这一步）'
+    const ops = chain.steps.map((s) => s.op)
+    const wait = chain.steps.filter((s) => s.op === 'wait')[0]
+    if (!wait || wait.args[0] !== 'textarea') return '没有先等输入框出现'
+    if (ops.indexOf('evaluate') === -1) return '没有先处理"正在生成"这件事（缺 evaluate）'
+    if (ops.indexOf('focus') === -1) return '没有把焦点放进输入框'
+    if (ops.indexOf('click') === -1) return '没有点发送按钮'
+    const paste = chain.steps.filter((s) => s.op === 'paste')[0]
+    if (paste.args[0] !== '请翻译下面内容: hello world') return '粘进去的文字不对：' + paste.args[0]
+    const click = chain.steps.filter((s) => s.op === 'click')[0]
+    if (click.args[0] !== 'input[type=file][multiple] + div[role=button]') {
+      return '点发送按钮的选择器不对：' + click.args[0]
+    }
+    if (rt.state.ubWindows.length !== 1) return '提问时不该另开窗口'
     if (rt.state.hiddenMain === 0) return '提问时没把主窗口收起来'
     return true
   })
 
-  check('注入时机不对会重试（宿主页还没加载完时不能把提问丢了）', async () => {
-    // 前两次注入"没人接"（返回 undefined），第三次才成功
-    const rt = createRuntime({ callbackMode: 'async', jsQueue: [undefined, undefined, true] })
-    rt.enter({ code: 'ask', payload: 'hi', type: 'over' })
-    rt.flush()
-    if (rt.state.jsCalls.length !== 1) return '第一次注入的次数不对：' + rt.state.jsCalls.length
-    await sleep(300)
-    if (rt.state.jsCalls.length < 3) return '没有重试（只注入了 ' + rt.state.jsCalls.length + ' 次）'
-    await sleep(200)
-    if (rt.state.jsCalls.length > 3) return '第三下成功之后还在继续注入'
+  check('五条划词指令各自的引子都对', async () => {
+    const want = {
+      ask: 'hi',
+      translate: '请翻译下面内容: hi',
+      genvarname: '变量取名: hi',
+      summarize: '总结下面内容: hi',
+      summarizeUrl: '总结这个网页的内容: hi',
+    }
+    const codes = Object.keys(want)
+    for (let i = 0; i < codes.length; i++) {
+      const code = codes[i]
+      const rt = createRuntime({ callbackMode: 'async' })
+      rt.enter({ code: code, payload: 'hi', type: 'over' })
+      await rt.settle()
+      const chain = rt.state.chains.filter((c) => c.steps.some((s) => s.op === 'paste')).slice(-1)[0]
+      if (!chain) return code + ' 没有把文字送进去'
+      const paste = chain.steps.filter((s) => s.op === 'paste')[0]
+      if (paste.args[0] !== want[code]) return code + ' 的引子不对：' + paste.args[0]
+    }
     return true
   })
 
-  check('地址回流：记会话、回首页忘掉、路过别的页不动', () => {
+  check('只开窗（没有文字）时不往里塞东西', async () => {
     const rt = createRuntime({ callbackMode: 'async' })
+    rt.enter({ code: 'summarizeUrl', payload: '', type: 'regex' })
+    await rt.settle()
+    if (rt.state.ubWindows.length !== 1) return '没开窗'
+    const pasted = rt.state.chains.filter((c) => c.steps.some((s) => s.op === 'paste'))
+    if (pasted.length) return '没带文字却粘了东西进去'
+    const focused = rt.state.chains.filter((c) => c.steps.some((s) => s.op === 'focus'))
+    return focused.length ? true : '该把光标放进输入框，却什么都没做'
+  })
+
+  check('地址与尺寸回流：从 uBrowser 的窗口实例上收下来', async () => {
+    const rt = createRuntime({ callbackMode: 'async' })
+    rt.fireIpc('ball:click')
+    await rt.settle()
     const conv = SITE + 'a/chat/s/75e63fe1-08bc-4e0b-a957-270557e00482'
-    rt.fireIpc('chat:url', conv + '#draft-1')
+    rt.state.ubWindows[0].url = conv + '#draft'
+    rt.state.ubWindows[0].width = 3000
+    rt.state.ubWindows[0].height = 3000
+    rt.fireIpc('ball:click')   // 藏起来这一步会顺手把地址和尺寸收下来
+    await rt.settle()
     if (rt.state.db.get('deepseek:lastChatUrl') !== conv) {
-      return '会话地址没记住（存的是 ' + rt.state.db.get('deepseek:lastChatUrl') + '）'
+      return '没记住会话地址（存的是 ' + rt.state.db.get('deepseek:lastChatUrl') + '）'
     }
-    rt.fireIpc('chat:url', SITE + 'sign_in')
-    if (rt.state.db.get('deepseek:lastChatUrl') !== conv) return '路过登录页把已记住的会话冲掉了'
-    rt.fireIpc('chat:url', 'https://example.com/x')
-    if (rt.state.db.get('deepseek:lastChatUrl') !== conv) return '站外地址把已记住的会话冲掉了'
-    rt.fireIpc('chat:url', SITE)
+    const size = JSON.parse(rt.state.db.get('deepseek:chatSize'))
+    if (size.width > 1600 || size.height > 1080) return '尺寸没夹取就落库了：' + JSON.stringify(size)
+
+    rt.state.ubWindows[0].url = SITE + 'sign_in'
+    rt.fireIpc('ball:click')
+    await rt.settle()
+    if (rt.state.db.get('deepseek:lastChatUrl') !== conv) return '路过登录页把记住的会话冲掉了'
+
+    rt.state.ubWindows[0].url = SITE
+    rt.fireIpc('ball:click')
+    await rt.settle()
     if (rt.state.db.has('deepseek:lastChatUrl')) return '回到对话首页没把会话忘掉'
     return true
   })
 
-  check('窗口缩放回流：尺寸夹取后落库', () => {
+  check('快捷键只叫不关：第二下不会把窗口藏起来', async () => {
     const rt = createRuntime({ callbackMode: 'async' })
-    rt.fireIpc('chat:size', { width: 3000, height: 3000 })
-    const saved = JSON.parse(rt.state.db.get('deepseek:chatSize'))
-    if (saved.height > 1080) return '高度没夹进屏幕可用区：' + saved.height
-    if (saved.width > 1600) return '宽度没夹进上限：' + saved.width
-    rt.fireIpc('chat:size', { width: 10, height: 10 })
-    const small = JSON.parse(rt.state.db.get('deepseek:chatSize'))
-    if (small.width !== 320 || small.height !== 400) return '没夹到最小尺寸：' + JSON.stringify(small)
-    return true
+    rt.enter({ code: 'deepseek-window', from: 'hotkey' })
+    await rt.settle()
+    if (rt.state.ubWindows.length !== 1) return '快捷键没开出对话窗'
+    rt.enter({ code: 'deepseek-window', from: 'hotkey' })
+    await rt.settle()
+    const hid = rt.state.chains.filter((c) => c.steps.some((s) => s.op === 'hide'))
+    if (hid.length) return '快捷键把窗口关掉了 —— 它现在只做"叫到跟前"'
+    return rt.state.ubWindows[0].shown ? true : '窗口被藏起来了'
   })
 
-  check('面板改尺寸：当场改掉已经开着的窗口', () => {
+  check('记住的会话：下次开窗直接开到那儿', async () => {
     const rt = createRuntime({ callbackMode: 'async' })
-    rt.enter({ code: 'deepseek', type: 'text' })
+    const conv = SITE + 'a/chat/s/abc'
+    rt.state.db.set('deepseek:lastChatUrl', conv)
     rt.fireIpc('ball:click')
-    const chat = rt.windowByUrl('page/chat.html')[0]
+    await rt.settle()
+    return rt.state.ubWindows[0].url === conv
+      ? true
+      : '开的不是记住的会话：' + rt.state.ubWindows[0].url
+  })
+
+  check('面板改尺寸：夹取后落库（uBrowser 改不了正在开的窗口，新尺寸下次开窗生效）', () => {
+    const rt = createRuntime({ callbackMode: 'async' })
     const next = rt.host.setChatSize(700, 800)
     if (next.chatSize.width !== 700 || next.chatSize.height !== 800) {
       return '面板拿到的尺寸不对：' + JSON.stringify(next.chatSize)
     }
-    if (chat.bounds.width !== 700 || chat.bounds.height !== 800) {
-      return '活着的窗口没跟着改：' + chat.bounds.width + '×' + chat.bounds.height
+    const saved = JSON.parse(rt.state.db.get('deepseek:chatSize'))
+    if (saved.width !== 700 || saved.height !== 800) return '尺寸没落库'
+    rt.host.setChatSize(99999, 99999)
+    const clamped = JSON.parse(rt.state.db.get('deepseek:chatSize'))
+    if (clamped.width > 1600 || clamped.height > 1080) {
+      return '超范围的尺寸没被夹取：' + JSON.stringify(clamped)
     }
-    return true
-  })
-
-  check('快捷键三态：开 → 调到最前 → 收起', () => {
-    const rt = createRuntime({ callbackMode: 'async' })
-    rt.enter({ code: 'deepseek-window', from: 'hotkey' })
-    rt.flush()
-    const chat = rt.windowByUrl('page/chat.html')[0]
-    if (!chat) return '快捷键没开出对话窗'
-    rt.enter({ code: 'deepseek-window', from: 'hotkey' })
-    if (chat.hideCalls) return '窗口不在最前面时按快捷键不该关窗'
-    if (!chat.focused) return '没把窗口调到最前面'
-    rt.enter({ code: 'deepseek-window', from: 'hotkey' })
-    if (chat.hideCalls !== 1) return '在最前面时按快捷键没关窗（hideCalls=' + chat.hideCalls + '）'
     return true
   })
 
@@ -673,268 +748,12 @@ function checkRuntime() {
  * 几个 getElementById 的空壳、localStorage / sessionStorage、以及 chatHost 这个桥。
  * executeJavaScript 的返回值按探针里的关键字编排 —— 这套断言能成立就靠它。
  */
-function createHostRuntime(options) {
-  const opts = options || {}
-  const events = {}
-  const attrs = {}
-  const executed = []
-  const reported = []
-  const copied = []
-  const tokens = []
-  const cleared = []
-  const storage = new Map()
-  const session = new Map()
-  const elements = {}
-  let reloads = 0
-  let currentUrl = opts.url || ''
-
-  if (opts.pageToken) storage.set('userToken', opts.pageToken)
-  if (opts.sessionSeenApp) session.set('dsChatSeenApp', '1')
-
-  const webview = {
-    executeJavaScript(code) {
-      executed.push(code)
-      if (code.indexOf('aria-disabled') !== -1) return Promise.resolve(opts.generating === true)
-      if (code.indexOf('querySelector("input[type=file]') !== -1) return Promise.resolve(opts.ready !== false)
-      if (code.indexOf('location.pathname') !== -1) return Promise.resolve(opts.pathname || '/')
-      if (code.indexOf('getItem("userToken")') !== -1) return Promise.resolve(storage.get('userToken') || null)
-      if (code.indexOf('setItem("userToken"') !== -1) {
-        const m = code.match(/setItem\("userToken",\s*("(?:[^"\\]|\\.)*")\)/)
-        if (m) storage.set('userToken', JSON.parse(m[1]))
-        return Promise.resolve(undefined)
-      }
-      if (code.indexOf('focus()') !== -1) return Promise.resolve(true)
-      if (code.indexOf('.click()') !== -1) return Promise.resolve(true)
-      return Promise.resolve(undefined)
-    },
-    setAttribute(k, v) { attrs[k] = v },
-    getAttribute(k) { return attrs[k] },
-    addEventListener(type, fn) { (events[type] = events[type] || []).push(fn) },
-    focus() {},
-    reload() { reloads++ },
-    getURL() { return currentUrl },
-    openDevTools() {},
-  }
-
-  const chatHost = {
-    isDev() { return false },
-    isDark() { return false },
-    readLastUrl() { return opts.savedUrl || null },
-    readToken() { return opts.savedToken || null },
-    writeToken(t) { tokens.push(t) },
-    clearToken() { cleared.push(true) },
-    copyText(t) { copied.push(t) },
-    tapPaste() { copied.push('__PASTE__') },
-    send(channel, payload) { reported.push({ channel: channel, payload: payload }) },
-  }
-
-  const sandboxWindow = {
-    chatHost: chatHost,
-    addEventListener(type, fn) { (events['window:' + type] = events['window:' + type] || []).push(fn) },
-    outerWidth: 460,
-    outerHeight: 900,
-  }
-
-  function element(id) {
-    if (!elements[id]) {
-      const classes = new Set()
-      elements[id] = {
-        id: id,
-        textContent: '',
-        classes: classes,
-        classList: {
-          add(c) { classes.add(c) },
-          remove(c) { classes.delete(c) },
-        },
-      }
-    }
-    return elements[id]
-  }
-
-  const fakeWebview = opts.noWebview ? { setAttribute() {}, addEventListener() {} } : webview
-
-  const context = vm.createContext({
-    console: { log() {}, warn() {}, error() {} },
-    setTimeout: setTimeout,
-    clearTimeout: clearTimeout,
-    setInterval: setInterval,
-    clearInterval: clearInterval,
-    window: sandboxWindow,
-    document: {
-      querySelector: (sel) => (sel === 'webview' ? fakeWebview : null),
-      getElementById: element,
-      documentElement: { classList: { add() {} } },
-    },
-    navigator: { userAgent: 'Mozilla/5.0 Chrome/126.0.0.0 Electron/34.5.8 Safari/537.36' },
-    location: { href: 'file:///plugin/page/chat.html', pathname: '/' },
-    localStorage: {
-      getItem: (k) => (storage.has(k) ? storage.get(k) : null),
-      setItem: (k, v) => storage.set(k, v),
-      removeItem: (k) => storage.delete(k),
-    },
-    sessionStorage: {
-      getItem: (k) => (session.has(k) ? session.get(k) : null),
-      setItem: (k, v) => session.set(k, v),
-    },
-    Promise: Promise,
-  })
-
-  vm.runInContext(readPlugin('page/chat-host.js'), context, { filename: 'page/chat-host.js' })
-
-  return {
-    attrs: attrs,
-    executed: executed,
-    reported: reported,
-    copied: copied,
-    tokens: tokens,
-    cleared: cleared,
-    storage: storage,
-    elements: elements,
-    chat: sandboxWindow.dsChat,
-    reloads: () => reloads,
-    setUrl(u) { currentUrl = u },
-    emitted: () => Object.keys(events).filter((k) => k.indexOf('window:') !== 0),
-    emit(type, payload) { (events[type] || []).forEach((fn) => fn(payload)) },
-    hasWindowEvent: (type) => (events['window:' + type] || []).length > 0,
-    resize() { (events['window:resize'] || []).forEach((fn) => fn({})) },
-  }
-}
-
-function checkHostPage() {
-  section('宿主页（沙箱）')
-
-  check('UA 里去掉了 Electron 标记，并按记住的会话设了 src', () => {
-    const conv = SITE + 'a/chat/s/abc123'
-    const host = createHostRuntime({ savedUrl: conv })
-    const ua = host.attrs.userAgent
-    if (!ua) return '没有给 webview 设 UA'
-    if (ua.indexOf('Electron') !== -1) return 'UA 里还有 Electron：' + ua
-    if (host.attrs.src !== conv) return 'src 不是记住的会话：' + host.attrs.src
-    return true
-  })
-
-  check('没有记住的会话时落到官网首页', () => {
-    const host = createHostRuntime({})
-    return host.attrs.src === SITE ? true : 'src 不对：' + host.attrs.src
-  })
-
-  check('这个环境没给 webview 能力时显兜底界面，而不是留一片白', () => {
-    const host = createHostRuntime({ noWebview: true })
-    const fb = host.elements.fallback
-    if (!fb || !fb.classes.has('show')) return '兜底界面没显示出来'
-    if (!host.elements.fbTitle.textContent) return '兜底界面没有标题'
-    return true
-  })
-
-  check('导航地址会报给父窗', () => {
-    const host = createHostRuntime({ url: SITE })
-    if (host.emitted().indexOf('did-navigate-in-page') === -1) return '没监听 did-navigate-in-page'
-    host.emit('did-navigate-in-page', {})
-    const urls = host.reported.filter((r) => r.channel === 'chat:url')
-    if (!urls.length) return 'did-navigate-in-page 没上报地址'
-    return urls[0].payload === SITE ? true : '上报的地址不对：' + urls[0].payload
-  })
-
-  check('窗口缩放会报给父窗（且跳过建窗时那一次）', async () => {
-    const host = createHostRuntime({})
-    if (!host.hasWindowEvent('resize')) return '没监听窗口 resize'
-    host.resize()
-    if (host.reported.filter((r) => r.channel === 'chat:size').length !== 0) {
-      return '首次 resize 被当成用户改尺寸了'
-    }
-    host.resize()
-    // 上报是防抖的（拖窗口时别一帧报一次），所以这里要等过防抖窗口
-    await sleep(600)
-    const sizes = host.reported.filter((r) => r.channel === 'chat:size')
-    if (sizes.length !== 1) return '第二次 resize 没上报（' + sizes.length + ' 次）'
-    if (sizes[0].payload.width !== 460 || sizes[0].payload.height !== 900) {
-      return '上报的尺寸不对：' + JSON.stringify(sizes[0].payload)
-    }
-    return true
-  })
-
-  check('提问：带上引子前缀、先粘后发', async () => {
-    const host = createHostRuntime({ ready: true })
-    host.emit('did-stop-loading', {})
-    await sleep(300)   // 等宿主页轮询到"页面就绪"
-    await host.chat.ask({ code: 'genvarname', payload: 'foo' })
-    const text = host.copied.filter((t) => t !== '__PASTE__')[0]
-    if (text !== '变量取名: foo') return '复制进剪贴板的文字不对：' + text
-    if (host.copied.indexOf('__PASTE__') === -1) return '没有模拟粘贴'
-    const clicks = host.executed.filter((c) => c.indexOf('.click()') !== -1)
-    if (!clicks.length) return '没有点发送按钮'
-    return true
-  })
-
-  check('页面还没就绪时先记下提问，就绪后补发', async () => {
-    const host = createHostRuntime({ ready: true })
-    await host.chat.ask({ code: 'ask', payload: 'queued' })
-    await sleep(50)
-    if (host.copied.length) return '页面没就绪就把文字送进去了'
-    host.emit('did-stop-loading', {})
-    await sleep(1200)
-    const text = host.copied.filter((t) => t !== '__PASTE__')[0]
-    return text === 'queued' ? true : '就绪后没补发：' + text
-  })
-
-  check('正在生成时先停掉再发新消息', async () => {
-    const host = createHostRuntime({ ready: true, generating: true })
-    host.emit('did-stop-loading', {})
-    await sleep(300)
-    await host.chat.ask({ code: 'ask', payload: 'again' })
-    const clicks = host.executed.filter((c) => c.indexOf('.click()') !== -1)
-    if (clicks.length < 2) return '只点了 ' + clicks.length + ' 次（应该先停一次、再发一次）'
-    return true
-  })
-
-  check('登录页：把记住的令牌写回去并重载（只重载一次）', async () => {
-    const host = createHostRuntime({
-      ready: true, pathname: '/sign_in', savedToken: 'tok-1', pageToken: null,
-    })
-    host.emit('did-stop-loading', {})
-    await sleep(400)
-    if (host.storage.get('userToken') !== 'tok-1') return '没把令牌写回 localStorage'
-    if (host.reloads() !== 1) return '写回后没重载（' + host.reloads() + ' 次）'
-    host.emit('did-stop-loading', {})
-    await sleep(400)
-    return host.reloads() === 1 ? true : '重载了多次（' + host.reloads() + ' 次），会陷入刷新循环'
-  })
-
-  check('已登录：把页面里的令牌存一份', async () => {
-    const host = createHostRuntime({ ready: true, pathname: '/', pageToken: 'tok-9' })
-    host.emit('did-stop-loading', {})
-    await sleep(400)
-    return host.tokens.indexOf('tok-9') !== -1 ? true : '没把官网的令牌存下来'
-  })
-
-  check('登出：丢掉镜像，不把旧令牌塞回去', async () => {
-    const host = createHostRuntime({
-      ready: true, pathname: '/sign_in', savedToken: 'tok-old', sessionSeenApp: true, pageToken: null,
-    })
-    host.emit('did-stop-loading', {})
-    await sleep(400)
-    if (host.storage.get('userToken')) return '把旧令牌又写回页面了（用户会登不出去）'
-    return host.cleared.length ? true : '没有清掉镜像'
-  })
-
-  check('失败浮层只在真的失败时出现（ERR_ABORTED 不算）', () => {
-    const host = createHostRuntime({})
-    host.emit('did-fail-load', { errorCode: -3, isMainFrame: true, errorDescription: 'ERR_ABORTED' })
-    if (host.elements.fallback.classes.has('show')) return '正常的导航中断被当成加载失败了'
-    host.emit('did-fail-load', { errorCode: -105, isMainFrame: true, errorDescription: 'ERR_NAME_NOT_RESOLVED' })
-    return host.elements.fallback.classes.has('show') ? true : '真的加载失败却没显兜底界面'
-  })
-}
-
-// ---------------------------------------------------------------- 主流程
-
 async function main() {
   checkManifest()
   checkSources()
   checkWiring()
   checkIcon()
   checkRuntime()
-  checkHostPage()
 
   await runAll()
 

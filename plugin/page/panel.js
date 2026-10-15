@@ -54,15 +54,16 @@
 
     sizeHint.textContent = '默认 ' + fmt(state.chatSizeDefault) + '（手机比例），最小 ' +
       fmt(state.chatSizeMin) + '，再大也不会超出屏幕。' +
-      (state.chatOpen ? '对话窗正开着，改动立刻生效。' : '下次开窗生效。')
+      (state.chatOpen ? '对话窗正开着，改动下次开窗生效（它是 uTools 的浏览器窗口，改不了正在开的那个）。'
+        : '改动下次开窗生效。')
 
     // 快捷键。uTools 自己管着系统级注册，面板只负责显示"现在配的是哪个键"，
     // 点「设置」跳去它那边配（面板里没法直接抓按键组合）。
     hotkeyValue.textContent = state.hotkey || '未设置'
     hotkeyValue.classList.toggle('none', !state.hotkey)
     hotkeyHint.textContent = state.hotkey
-      ? '按 ' + state.hotkey + ' 把对话窗叫到跟前：没开就打开，被别的窗口盖住就调到最前，' +
-        '已经在最前面再按一下才关掉（和点悬浮球的"开/关"不同，点球是开着就关）。'
+      ? '按 ' + state.hotkey + ' 把对话窗叫到跟前（没开就打开，藏着或被盖住就摆到最前）。' +
+        '快捷键只负责叫出来、不会关窗 —— 关窗点悬浮球，或用对话窗自己的关闭按钮。'
       : '在 uTools 的全局快捷键里给「' + (state.hotkeyCmd || 'DeepSeek窗口') +
         '」这条指令绑一个键，就能随时把对话窗叫出来 —— 点「设置」直接跳过去。'
   }
@@ -101,8 +102,18 @@
     var fn = ACTIONS[el.getAttribute('data-act')]
     if (!fn) return
     try {
-      var state = fn()
-      if (state) render(state)
+      var result = fn()
+      // 开关对话窗那几颗是异步的（对话窗是 uTools 自己的浏览器窗口），返回的是 Promise<state>；
+      // 其余是同步的，直接就是 state。两条都接住。
+      if (result && typeof result.then === 'function') {
+        result.then(function (state) {
+          if (state) render(state)
+        }, function (err) {
+          console.error('[panel] 操作失败:', el.getAttribute('data-act'), err)
+        })
+        return
+      }
+      if (result) render(result)
     } catch (err) {
       console.error('[panel] 操作失败:', el.getAttribute('data-act'), err)
     }

@@ -9,9 +9,10 @@ const KEYS = {
   ballVisible: 'deepseek:ballVisible',
   chatSize: 'deepseek:chatSize',
   lastChatUrl: 'deepseek:lastChatUrl',
-  // 官网登录令牌的镜像。对话窗用的是非持久化会话（重启就丢），
-  // 靠这份副本免掉重新登录 —— 见 page/chat-preload.js 与 page/chat-host.js 的 syncToken。
-  userToken: 'deepseek:userToken',
+  // 对话窗此刻是不是"摆着"（而不是被我们藏起来了）。
+  // uBrowser 给的窗口信息里没有"可见性"这一栏（只有 id / 地址 / 标题 / 几何），
+  // 所以"显还是藏"只能插件自己记 —— 见 js/windows.js 的 isChatVisible。
+  chatShown: 'deepseek:chatShown',
 }
 
 function read(key, fallback) {
@@ -117,22 +118,16 @@ function setLastChatUrl(url) {
   else write(KEYS.lastChatUrl, String(url))
 }
 
-// ---- 登录令牌的镜像 ----
-// 是个字符串（官网自己存在 localStorage 里的那份），只有"有没有"两种状态，不做解析。
-// 用户点了登出、令牌过期时都会把它清掉（判断在 page/chat-host.js 的 syncToken 里）。
+// ---- 对话窗是不是摆着 ----
+// 默认 false：没开过就是藏着的（那时窗口列表里也不会有它）。
 
-function getUserToken() {
-  const raw = read(KEYS.userToken, null)
-  return typeof raw === 'string' && raw ? raw : null
+function isChatShown() {
+  const raw = read(KEYS.chatShown, false)
+  return raw === true
 }
 
-function setUserToken(token) {
-  if (!token) remove(KEYS.userToken)
-  else write(KEYS.userToken, String(token))
-}
-
-function clearUserToken() {
-  remove(KEYS.userToken)
+function setChatShown(shown) {
+  write(KEYS.chatShown, !!shown)
 }
 
 module.exports = {
@@ -147,7 +142,6 @@ module.exports = {
   clearChatSize,
   getLastChatUrl,
   setLastChatUrl,
-  getUserToken,
-  setUserToken,
-  clearUserToken,
+  isChatShown,
+  setChatShown,
 }

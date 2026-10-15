@@ -13,7 +13,6 @@ const config = require('./config')
 const BALL_SIZE = 60
 
 let ballWin = null
-let chatWin = null
 let dragOrigin = null
 
 // 有些窗口方法的可用性在 uTools 各版本间并不一致（loadURL 就是这么没的），
@@ -41,11 +40,6 @@ function alive(win) {
 function getBallWindow() {
   ballWin = alive(ballWin)
   return ballWin
-}
-
-function getChatWindow() {
-  chatWin = alive(chatWin)
-  return chatWin
 }
 
 // ---------- 位置计算 ----------
@@ -336,6 +330,35 @@ function collapseBallMenu() {
 }
 
 // ---------- DeepSeek 对话窗 ----------
+//
+// 对话窗用的**不是**我们自己 createBrowserWindow 出来的窗口，而是 uTools 自带的浏览器
+// （utools.ubrowser，uTools 文档里的"内置浏览器"）。这是实测逼出来的：
+//   - 我们自己的窗口里装不了官网：<webview> 根本用不了 —— uTools 构造窗口时只把
+//     webPreferences.preload 透给 Electron，webviewTag 没这一项（uTools 自己的类型定义里
+//     webPreferences 也只声明了 preload），页面上拿到的只是个空元素；
+//     让窗口自己顶层导航到官网，又会撞上官网那两只脚本加载不起来（只弹"页面资源加载异常"）。
+//   - uBrowser 是 uTools 自己管着的浏览器窗口：官网在里面正常渲染，而且它的会话是**持久化**的
+//     （%APPDATA%\uTools\Partitions\<插件id>.ubrowser 真落盘），登录态和页面存储重启都在。
+// 代价是这一层只能用 uTools 给的那套链式 API（goto / wait / focus / paste / evaluate / show / hide），
+// 没有窗口实例可拿：窗口在不在，只能问 utools.getIdleUBrowsers()。
+
+const SITE = 'https://chat.deepseek.com/'
+
+// 认"哪个 uBrowser 窗口是我们的"：地址落在官网域名上就算（登录页也算）。
+const CHAT_URL_RE = /^https:\/\/chat\.deepseek\.com\//
+
+// 官网的 DOM 钩子。这几条是从参考实现（JinkoWu 的 DeepSeek）那儿搬来的实测值，
+// 官网改版会让它们失效 —— 那时表现是"文字没粘进去"或"点了不发送"，先看这里。
+const SEL_INPUT = 'textarea'
+const SEL_SEND = 'input[type=file][multiple] + div[role=button]'
+
+// 选中文字那几条指令，注入前给文字加的引子（参考实现的措辞）。
+const PREFIX = {
+  translate: '请翻译下面内容: ',
+  genvarname: '变量取名: ',
+  summarize: '总结下面内容: ',
+  summarizeUrl: '总结这个网页的内容: ',
+}
 
 // 默认按手机比例做，比真手机窗口略大一圈：窄而高，和官网手机版布局对得上，
 // 不会像宽窗口那样在两侧留一大片空白。
@@ -350,7 +373,7 @@ function clampNumber(value, min, max) {
 }
 
 /**
- * 算出对话窗该用多大：存过的尺寸（没有就用手机尺寸），再夹进当前主屏的可用区域。
+ * 算出对话窗该开多大：存过的尺寸（没有就用手机尺寸），再夹进当前主屏的可用区域。
  * 夹取是为了别在 768 高的小屏笔记本上开出一个半截在屏幕外的窗口。
  * @param {{width:number,height:number}} [override] 用这套尺寸代替存储里的（设置面板保存时用）
  */
@@ -373,274 +396,216 @@ function saveChatSize(width, height) {
   return size
 }
 
-/**
- * 面板上点「应用」：存下来，并且**当场**把已经开着的那个窗口改成这个大小。
- *
- * 为什么要动活窗口：关窗现在是 hide 复用，窗口会一直活着 —— 只写库的话，
- * 用户点了「应用」在界面上什么都不会发生，等到下次窗口真的被重建才生效（可能是几天后）。
- */
-function applyChatSize(width, height) {
-  const size = saveChatSize(width, height)
-  const win = getChatWindow()
-  if (!win) return size
-  try {
-    if (typeof win.setSize === 'function') win.setSize(size.width, size.height)
-    else win.setBounds({ width: size.width, height: size.height })
-  } catch (e) {
-    // 改不动就只落库：下次窗口重建时会按新尺寸开，不是"白设"。
-    warnOnce('setSize', '[chat] window.setSize 不可用，新尺寸下次开窗生效:', e)
-  }
-  return size
-}
-
 function resetChatSize() {
   config.clearChatSize()
   return resolveChatSize()
 }
 
+// uBrowser 的窗口 id。它只是个缓存：真判断"窗口还在不在"一律以 getIdleUBrowsers 为准。
+let chatWinId = null
+
 /**
- * 对话窗开着没有。判据是"可见"：窗口被手动关掉后 getChatWindow() 会返回 null，
- * 而最小化的窗口在这里也算"开着" —— 点一下球把它关掉也说得通。
+ * 当前插件空闲的 uBrowser 窗口里，哪些是 DeepSeek 对话窗。
+ *
+ * getIdleUBrowsers() 给的是"本插件下、操作队列已经跑完"的窗口 —— 我们自己的链式操作
+ * 执行期间那个窗口不在列表里，所以这个函数只在链条外面调。
+ * 认领条件两条：id 和我们记的那个对得上（用户把页面点到站外了也还认），
+ * 或者地址在官网域名上（插件重启、id 丢了的时候靠它认回来）。
+ */
+function chatWindows() {
+  let list = []
+  try {
+    list = utools.getIdleUBrowsers() || []
+  } catch (e) {
+    warnOnce('idleBrowsers', '[chat] utools.getIdleUBrowsers 不可用，认不出已经开着的对话窗:', e)
+    return []
+  }
+  const mine = list.filter((w) => w && (w.id === chatWinId ||
+    (typeof w.url === 'string' && CHAT_URL_RE.test(w.url))))
+  chatWinId = mine.length ? mine[mine.length - 1].id : null
+  return mine
+}
+
+/**
+ * 对话窗现在摆在桌面上没有。
+ *
+ * uBrowser 的窗口实例只有 id / 地址 / 标题 / 宽高 / 坐标，**没有"可见性"这一栏**，
+ * 所以"显着还是藏着"只能插件自己记（config.isChatShown）；窗口本身还在不在则以窗口列表为准：
+ * 用户用窗口自己的 × 关掉之后列表里就没有它了，这里会退化成"没开"，下次点球重新开一个。
  */
 function isChatVisible() {
-  const win = getChatWindow()
-  if (!win) return false
-  try {
-    const visible = win.isVisible()
-    if (typeof visible === 'boolean') return visible
-  } catch (e) {
-    warnOnce('isVisible', '[chat] window.isVisible 不可用，按"已打开"处理（点球会关掉它）:', e)
-    return true
-  }
-  // 拿不到布尔值也按"开着"处理：这样点球仍然是"关闭"，开开关关依然成立。
-  // 反过来（按"关着"处理）会让点球永远只做 show()，再也关不掉窗口。
-  return true
+  if (!chatWindows().length) return false
+  return config.isChatShown()
+}
+
+/** uBrowser 的 run() 返回 [...各步结果, 窗口实例]，要的永远是最后那一个 */
+function lastOf(result) {
+  return Array.isArray(result) ? result[result.length - 1] : null
 }
 
 /**
- * 打开或聚焦 DeepSeek 对话窗。已存在就前置，不重复开窗。
- *
- * 窗口装的是本地宿主页 page/chat.html，官网友在它的 <webview> 里 —— 这套做法是从参考插件
- * （JinkoWu 的 DeepSeek）搬来的，同一台机器上它能把 chat.deepseek.com 正常打开。
- * 早先那一版是让窗口自己顶层导航到官网，官网那两只带 integrity + crossorigin 的脚本
- * 在那种窗口里加载不起来（请求 0 字节结束，官网弹「页面资源加载异常」），所以换掉了。
- *
- * webPreferences 里有两项是关键，而 uTools 的窗口选项类型定义里没声明它们，
- * 靠透传给 Electron：
- *   - webSecurity: false —— 关掉同源策略。代价只落在这个窗口里（它只装 chat.deepseek.com），
- *     换来的是官网的跨域资源不再被 CORS 那一层卡住；
- *   - webviewTag: true   —— 不给的话页面上根本没有 <webview> 可用。
+ * 把窗口实例上的信息收下来：当前地址（记住上次的会话）和当前尺寸（用户拖过窗口就靠这个记住）。
+ * 每次跟这个窗口打完交道都过一遍。
  */
-function openChat() {
-  const existing = getChatWindow()
-  if (existing) {
-    existing.show()
-    existing.focus()
-    return existing
-  }
-
-  const size = resolveChatSize()
-  const win = utools.createBrowserWindow('page/chat.html', {
-    show: true,
-    title: 'DeepSeek',
-    width: size.width,
-    height: size.height,
-    minWidth: MIN_CHAT_SIZE.width,
-    minHeight: MIN_CHAT_SIZE.height,
-    center: true,
-    backgroundColor: '#ffffff',
-    webPreferences: {
-      // 宿主页的 preload：上次的会话地址、登录令牌的镜像、剪贴板与粘贴都从它挂出来的
-      // window.chatHost 上取（页面自己不碰 utools 全局）。
-      preload: 'page/chat-preload.js',
-      webSecurity: false,
-      webviewTag: true,
-      devTools: true,
-    },
-  })
-
-  chatWin = win
-  return win
-}
-
-/**
- * 点悬浮球的行为：开着就关，关着就开。
- * @returns {boolean} true 表示这次是"打开"
- */
-function toggleChat() {
-  if (isChatVisible()) {
-    closeChat()
-    return false
-  }
-  openChat()
-  return true
-}
-
-/**
- * 把对话窗收起来。
- *
- * 这里是 hide 而不是销毁：窗口留着，里面那一页（登录态、正在打的字、滚动位置）都还在，
- * 点球再开是一瞬间的事。uTools 官方文档也明确警告过不要在 onPluginOut 里关闭自定义窗口，
- * 留着窗口正顺着这条规矩。hide 失败才退回销毁 —— 那说明这个窗口已经不健康了。
- *
- * 注意 chatWin 引用要留着，下次 openChat 就是把它 show() 出来。
- */
-function closeChat() {
-  const win = getChatWindow()
-  if (!win) return
-  try {
-    win.hide()
-  } catch (e) {
-    warnOnce('hide', '[chat] window.hide 不可用，改销毁窗口:', e)
-    chatWin = null
-    try {
-      win.destroy()
-    } catch (e2) {
-      console.error('[chat] 销毁窗口也失败:', e2)
-    }
+function absorb(instance) {
+  if (!instance) return
+  if (typeof instance.url === 'string' && instance.url) rememberChatUrl(instance.url)
+  if (typeof instance.width === 'number' && typeof instance.height === 'number' &&
+    instance.width > 0 && instance.height > 0) {
+    saveChatSize(instance.width, instance.height)
   }
 }
 
-// ---------- 把选中文字送进对话窗 ----------
-
-/**
- * 执行一次"向 DeepSeek 提问/翻译/总结"：开窗（或前置）之后，把这一步的进入动作交给
- * 宿主页，由它粘进官网输入框、该发送就发送。
- *
- * 交给页面的方式是 executeJavaScript —— 父 → 子只有这一条路（宿主页是本地页，
- * 父窗没有别的办法跟它说话）；为了敲得着，宿主页把入口挂在 window.dsChat 上。
- *
- * 为什么要重试：窗口刚建出来时宿主页的脚本可能还没跑完，那一下 window.dsChat 是 undefined，
- * executeJavaScript 会静静地返回 undefined（不报错）。所以这里以"返回值是不是 true"为准，
- * 拿不到就等下一轮 —— 一次提问没有第二次机会，不能靠"应该加载完了"。
- *
- * @param {{code?: string, payload?: string}} action uTools 的进入动作
- * @returns {Promise<boolean>} 有没有把提问递进页面
- */
-function askChat(action) {
-  const data = {
-    code: (action && action.code) || '',
-    payload: (action && action.payload) || '',
-  }
-  const win = openChat()
-  // 粘贴是往系统里注入按键，窗口必须在眼前；窗口本来就开着也要前置一下，
-  // 否则用户会看到"文字进了剪贴板但没粘到任何地方"。
-  try {
-    win.show()
-    win.focus()
-  } catch (e) {
-    warnOnce('askShow', '[chat] 前置对话窗失败（粘贴可能落不到输入框）:', e)
-  }
-
-  let wc = null
-  try {
-    wc = win.webContents
-  } catch (e) {
-    wc = null
-  }
-  if (!wc || typeof wc.executeJavaScript !== 'function') {
-    warnOnce('askExecute', '[chat] webContents.executeJavaScript 不可用，提问送不进去')
-    return Promise.resolve(false)
-  }
-
-  const code = 'window.dsChat && window.dsChat.ask && (window.dsChat.ask(' +
-    JSON.stringify(data) + '), true)'
-
-  function attempt(triesLeft) {
-    let call = null
-    try {
-      call = wc.executeJavaScript(code, false)
-    } catch (e) {
-      warnOnce('askThrow', '[chat] executeJavaScript 抛错，提问送不进去:', e)
-      return Promise.resolve(false)
-    }
-    return Promise.resolve(call).then((ok) => {
-      if (ok === true) return true
-      if (triesLeft <= 0) {
-        console.error('[chat] 提问没能送进对话窗（宿主页没加载起来？）')
-        return false
-      }
-      return sleep(100).then(() => attempt(triesLeft - 1))
+/** 开窗（没有的话）或把已经开着的窗口摆到桌面上 */
+function showChat() {
+  const list = chatWindows()
+  if (list.length) {
+    const id = list[list.length - 1].id
+    return utools.ubrowser.show().run(id).then((result) => {
+      absorb(lastOf(result))
+      config.setChatShown(true)
+      return true
+    }).catch((e) => {
+      console.error('[chat] 显示对话窗失败:', e)
+      return false
     })
   }
 
-  return attempt(50)
+  const size = resolveChatSize()
+  return utools.ubrowser
+    .goto(config.getLastChatUrl() || SITE)
+    .show()
+    .run({
+      title: 'DeepSeek',
+      width: size.width,
+      height: size.height,
+      minWidth: MIN_CHAT_SIZE.width,
+      minHeight: MIN_CHAT_SIZE.height,
+      center: true,
+    })
+    .then((result) => {
+      const instance = lastOf(result)
+      if (instance && typeof instance.id === 'number') chatWinId = instance.id
+      absorb(instance)
+      config.setChatShown(true)
+      return true
+    })
+    .catch((e) => {
+      console.error('[chat] 打开对话窗失败:', e)
+      return false
+    })
 }
-
-function sleep(ms) {
-  return new Promise((ok) => setTimeout(ok, ms))
-}
-
-// ---------- 全局快捷键：把窗口"叫到跟前" ----------
 
 /**
- * 对话窗是不是就在最前面（拿着焦点）。
- *
- * 拿不到 isFocused 时一律按"不在最前面"处理：快捷键的职责是"把窗口叫出来"，
- * 叫不出来最多是白按一下；反过来判成"在最前面"，就会把用户正想看的窗口关掉。
+ * 把对话窗藏起来 —— uBrowser 没有程序化的"关窗"，藏起来就是我们的"关闭"。
+ * 藏起来之后那一页还在（登录态、正在打的字都在），再点球是一瞬间的事。
  */
-function isChatFocused(win) {
-  const target = win || getChatWindow()
-  if (!target) return false
-  try {
-    const focused = target.isFocused()
-    if (typeof focused === 'boolean') return focused
-  } catch (e) {
-    warnOnce('isFocused', '[chat] window.isFocused 不可用，快捷键只做"调到前台"（不再靠它关窗）:', e)
-  }
-  return false
+function hideChat() {
+  const list = chatWindows()
+  config.setChatShown(false)
+  if (!list.length) return Promise.resolve(false)
+  const id = list[list.length - 1].id
+  return utools.ubrowser.hide().run(id).then((result) => {
+    absorb(lastOf(result))
+    return true
+  }).catch((e) => {
+    console.error('[chat] 隐藏对话窗失败:', e)
+    return false
+  })
 }
 
-/** 把对话窗调到最前面：最小化了先还原，然后显示并聚焦 */
-function bringChatToFront(win) {
-  const target = win
+/**
+ * 点悬浮球（或面板上那颗按钮）：开着就藏起来，没开就开。
+ * @returns {Promise<boolean>} true 表示这次是"打开"
+ */
+function toggleChat() {
+  return isChatVisible()
+    ? hideChat().then(() => false)
+    : showChat().then(() => true)
+}
+
+/**
+ * 官网正在生成回答时先替用户停掉它 —— 不然新消息只会被官网排队，看着像"发了没反应"。
+ *
+ * 判据是"输入框空着 + 发送按钮却可点"：生成期间那个按钮是"停止"，一直可点；空闲时它只有
+ * 输入框里有字才可点。只认"按钮可点"会误判 —— 用户打着草稿时会被我们替他发出去。
+ * （这份更严的条件取自参考实现早先那版 ubrowser 代码。）
+ * 注意：这个函数会被序列化后送进页面执行，不能引用外部任何东西，参数只能靠入参传进来。
+ */
+function stopGenerating(sel) {
   try {
-    // 最小化的窗口 isVisible() 仍然是 true（它是"显示着但缩了"），
-    // 所以这里得单独认一下，否则 show() 只会把它从任务栏捞出来，窗口还缩着。
-    if (typeof target.isMinimized === 'function' && typeof target.restore === 'function' && target.isMinimized()) {
-      target.restore()
+    const input = document.querySelector(sel.input)
+    const btn = document.querySelector(sel.send)
+    if (btn && !(input && input.value && input.value.length) &&
+      btn.getAttribute('aria-disabled') === 'false') {
+      btn.click()
     }
   } catch (e) {
-    warnOnce('restore', '[chat] window.restore 不可用，直接 show():', e)
-  }
-  try {
-    target.show()
-  } catch (e) {
-    warnOnce('show', '[chat] window.show 失败:', e)
-  }
-  try {
-    target.focus()
-  } catch (e) {
-    warnOnce('focus', '[chat] window.focus 失败:', e)
+    // 官网改版 / 元素还没出来，就当没这回事
   }
 }
 
 /**
- * 全局快捷键按一下该干什么 —— **三态**，和"点悬浮球"的纯开关刻意不一样：
+ * 选中文字进来的那条路：开窗（或前置）之后把文字贴进输入框，该发送就发送。
  *
- *   窗口没开                         → 打开
- *   开着但不在最前面（被盖住/最小化） → 调到最前面，**不关**
- *   开着且就在最前面                 → 关掉
+ * wait(SEL_INPUT, …) 一次兼了两件事：等官网界面渲染出来、以及用户还没登录时等他把登录走完。
+ * 等不到会 reject（超时），这里吞掉并记一条 —— 用户看到的是"没反应"，不该看到我们的异常。
  *
- * 为什么不全用"开着就关"：鼠标点球的时候窗口就在眼前，点一下关掉是明确的意图；
- * 按快捷键的时候窗口多半藏在别的窗口后面，用户要的是"给我调出来"。
- * 这时候要是把它关掉，就成了"我想看它、它却没了"——按键盲操最容易踩这个。
- * 所以快捷键的第一下永远是"把它摆到你面前"，只有它已经在面前了，再按才是收起。
+ * @param {{code?: string, payload?: string}} action uTools 的进入动作
+ * @returns {Promise<boolean>} 有没有把文字送进去
+ */
+function askChat(action) {
+  const code = (action && action.code) || ''
+  let text = (action && action.payload) || ''
+  if (text) {
+    if (PREFIX[code]) text = PREFIX[code] + text
+    else if (code !== 'ask') text = ''
+  }
+
+  return showChat().then((shown) => {
+    if (!shown) return false
+    const list = chatWindows()
+    if (!list.length) return false
+    const id = list[list.length - 1].id
+
+    let chain = utools.ubrowser.wait(SEL_INPUT, 60 * 1000)
+    if (text) {
+      chain = chain
+        .evaluate(stopGenerating, { input: SEL_INPUT, send: SEL_SEND })
+        .wait(200)
+        .focus(SEL_INPUT)
+        .paste(text)
+        .wait(500)
+        .click(SEL_SEND)
+    } else {
+      chain = chain.focus(SEL_INPUT)
+    }
+
+    return chain.show().run(id).then((result) => {
+      absorb(lastOf(result))
+      config.setChatShown(true)
+      return true
+    }).catch((e) => {
+      console.error('[chat] 把文字送进对话窗失败:', e)
+      return false
+    })
+  })
+}
+
+/**
+ * 快捷键按一下：把对话窗叫到跟前。
  *
- * @returns {'open'|'front'|'close'} 这次做了什么（调用方据此决定要不要收 uTools 搜索框，也方便单测）
+ * 和上一版有个差别得说清楚：**快捷键不再关窗**。以前是"三态"（没开就开 / 被别的窗口盖住就
+ * 调到最前 / 已经在最前面才收起），第三态靠 window.isFocused() 判断；uBrowser 的窗口实例
+ * 只给 id / 地址 / 标题 / 几何，没有焦点也没有可见性，那个判断做不了了。
+ * 所以现在的规矩是"快捷键只管把窗口叫出来，关窗交给点球、球的右键菜单、或者窗口自己的 ×"——
+ * 盲操时第一下就把用户正想看的窗口关掉，比"多按一下没关掉"难受得多。
+ *
+ * @returns {Promise<'open'|'front'>} 这次是开了个新的，还是把已有的叫到跟前
  */
 function summonChat() {
-  const win = getChatWindow()
-  if (!win) {
-    openChat()
-    return 'open'
-  }
-  if (isChatFocused(win)) {
-    closeChat()
-    return 'close'
-  }
-  bringChatToFront(win)
-  return 'front'
+  const wasVisible = isChatVisible()
+  return showChat().then(() => (wasVisible ? 'front' : 'open'))
 }
 
 // ---------- 记住上次打开的会话 ----------
@@ -670,12 +635,12 @@ function rememberChatUrl(url) {
 }
 
 module.exports = {
+  SITE,
   BALL_SIZE,
   DEFAULT_CHAT_SIZE,
   MIN_CHAT_SIZE,
   MAX_CHAT_SIZE,
   getBallWindow,
-  getChatWindow,
   ensureBall,
   showBall,
   hideBall,
@@ -685,18 +650,19 @@ module.exports = {
   endDrag,
   expandBallForMenu,
   collapseBallMenu,
-  openChat,
-  closeChat,
+  // 对话窗这一组全是异步的（uBrowser 的链式操作返回 Promise）：
+  // showChat/hideChat/toggleChat 返回 Promise<boolean>（true = 现在开着），
+  // askChat 返回 Promise<boolean>（有没有把文字送进去），summonChat 返回 Promise<'open'|'front'>。
+  showChat,
+  hideChat,
   toggleChat,
   isChatVisible,
   askChat,
   summonChat,
-  isChatFocused,
   resolveChatSize,
   saveChatSize,
-  applyChatSize,
   resetChatSize,
   // 会话地址的取舍规则（记住会话、回首页忘掉、别的不碰）留在父窗这一侧：
-  // 宿主页只负责把地址报上来（chat:url），"值不值得记"由这里说了算。
+  // 每次跟对话窗打交道时，从 uBrowser 给的窗口实例上把地址收下来喂给它。
   rememberChatUrl,
 }

@@ -70,18 +70,22 @@ function hidePanelWindow() {
   }
 }
 
+/**
+ * 把对话窗打开（或从藏着的状态摆出来）。
+ * 对话窗是 uTools 自带的浏览器窗口，开关都是异步的 —— 返回 Promise<snapshot | boolean>。
+ */
 function openChatWindow() {
   hidePanelWindow()
-  return windows.openChat()
+  return windows.showChat().then(() => snapshot())
 }
 
 /**
- * 开着的对话窗就关掉，没开就打开。
+ * 开着的对话窗就藏起来，没开就打开。
  *
  * 开还是关这件事由 js/windows.js 的 toggleChat() 一个人说了算，这里只补 uTools 那侧的规矩：
  * **关的时候不收** uTools 搜索框 —— 这次多半是用户刚在面板上点的「关闭对话」，
  * 把面板一起收走会像"点了没反应"。收搜索框只发生在"要开窗"的那条路径上。
- * @returns {boolean} true 表示这次是打开
+ * @returns {Promise<boolean>} true 表示这次是打开
  */
 function toggleChatWindow() {
   if (!windows.isChatVisible()) hidePanelWindow()
@@ -89,19 +93,19 @@ function toggleChatWindow() {
 }
 
 /**
- * 快捷键按下时干什么。语义见 js/windows.js 的 summonChat()：三态，
- * 和点悬浮球的纯开关不一样（那里是"开着就关"，这里第一下永远是"叫到跟前"）。
+ * 快捷键按下时干什么。
  *
- * 收不收 uTools 搜索框跟着**动作**走，不跟着"窗口开没开"走：
- * 从搜索框里敲 `DeepSeek窗口` 回车也能进到这里，那时搜索框正开着，
- * 只要这一下是要把窗口摆到面前（open / front），就顺手把搜索框让开。
- * 配了 mainHide 的话（走快捷键那条路）搜索框根本没显示，这次调用也就无害。
+ * 语义见 js/windows.js 的 summonChat()：uBrowser 给不出"窗口在不在最前面"，所以现在
+ * **只做"叫到跟前"，永不关窗**。既然永远不会关，搜索框就一律让开 ——
+ * 从搜索框里敲 `DeepSeek窗口` 回车也能进到这里，那时搜索框正开着，顺手收掉才对；
+ * 走快捷键那条路时搜索框根本没显示（feature 上配了 mainHide），这次调用也无害。
  */
 function handleHotkeyEnter() {
-  const action = windows.summonChat()
-  if (action !== 'close') hidePanelWindow()
-  emit()
-  return action
+  hidePanelWindow()
+  return windows.summonChat().then((action) => {
+    emit()
+    return action
+  })
 }
 
 function openHotkeySetting() {
@@ -137,8 +141,7 @@ function setPanelHeight(height) {
  */
 function askChatWindow(action) {
   hidePanelWindow()
-  windows.askChat(action)
-  emit()
+  return windows.askChat(action).then(() => snapshot())
 }
 
 const host = {
@@ -166,31 +169,28 @@ const host = {
     emit()
     return snapshot()
   },
+  // 对话窗这三颗按钮都是异步的（uBrowser 的开关是链式操作）：返回 Promise<snapshot>。
+  // 面板那边对 Promise 是认的（见 page/panel.js 的点击处理）。
   openChat() {
-    openChatWindow()
-    emit()
-    return snapshot()
+    return openChatWindow()
   },
   closeChat() {
-    windows.closeChat()
-    emit()
-    return snapshot()
+    return windows.hideChat().then(() => {
+      emit()
+      return snapshot()
+    })
   },
   toggleChat() {
-    toggleChatWindow()
-    emit()
-    return snapshot()
-  },
-  // 快捷键（面板上只显示"当前配了哪个键"，按键组合由 uTools 管，这里只能跳过去配）
-  summonChat() {
-    handleHotkeyEnter()
-    return snapshot()
+    return toggleChatWindow().then(() => {
+      emit()
+      return snapshot()
+    })
   },
   openHotkeySetting,
-  // 面板上改尺寸：存下来，并当场改掉已经开着的窗口（关窗是 hide 复用，窗口一直活着，
-  // 只写库的话用户点「应用」看不到任何反应）
+  // 面板上改尺寸：先夹取再落库。对话窗是 uTools 自己的浏览器窗口，改不了已经开着的那个
+  // （链式 API 里没有改窗口尺寸这一步），所以新尺寸下次开窗生效 —— 面板文案是这么写的。
   setChatSize(width, height) {
-    windows.applyChatSize(width, height)
+    windows.saveChatSize(width, height)
     emit()
     return snapshot()
   },
@@ -208,8 +208,12 @@ window.deepseekHost = host
 // ---------------------------------------------------------------- 悬浮球消息
 
 function handleBallClick() {
-  toggleChatWindow()
-  emit()
+  // 开关是异步的（对话窗是 uTools 自己的浏览器窗口），状态要等它落定再报给面板，
+  // 否则面板上那颗按钮的字会慢一拍（点了「打开对话」还写着「打开对话」）。
+  toggleChatWindow().then(emit, (e) => {
+    console.error('[host] 开关对话窗失败:', e)
+    emit()
+  })
 }
 
 // 菜单项的文案跟着窗口状态走：开着的时候第一项该是「关闭对话」。
@@ -221,8 +225,14 @@ function menuItems() {
 }
 
 function handleMenuPick(id) {
-  if (id === 'chat') toggleChatWindow()
-  else if (id === 'hide') windows.hideBall()
+  if (id === 'chat') {
+    toggleChatWindow().then(emit, (e) => {
+      console.error('[host] 开关对话窗失败:', e)
+      emit()
+    })
+    return
+  }
+  if (id === 'hide') windows.hideBall()
   emit()
 }
 
@@ -284,21 +294,6 @@ function registerBallIpc() {
   ipcRenderer.on('ball:menuClose', () => closeBallMenu())
 }
 
-function registerChatIpc() {
-  // 对话窗报上来的当前地址。"记哪个、什么时候忘"这套判断集中在 js/windows.js 的
-  // rememberChatUrl 里（只认会话地址，回首页才清）—— 宿主页只管把地址送过来。
-  ipcRenderer.on('chat:url', (_e, url) => {
-    windows.rememberChatUrl(url)
-  })
-  // 用户在窗口里拖出来的新尺寸。夹取（最小尺寸、屏幕可用区域）在 saveChatSize 里做，
-  // 宿主页报的是原始值。
-  ipcRenderer.on('chat:size', (_e, size) => {
-    if (!size) return
-    windows.saveChatSize(size.width, size.height)
-    emit()
-  })
-}
-
 // ---------------------------------------------------------------- 生命周期
 
 // ipcRenderer 的监听是进程级的不随窗口销毁解绑，只能注册一次；
@@ -308,7 +303,6 @@ function setupOnce() {
   if (ipcRegistered) return
   ipcRegistered = true
   registerBallIpc()
-  registerChatIpc()
 }
 
 // 加载完成、正式进入之前的一次性初始化。
