@@ -11,7 +11,6 @@
 | 让自建窗口自己顶层导航到官网 | 官网那两只带 `integrity` + `crossorigin` 的脚本加载不起来（请求 0 字节结束），官网弹「页面资源加载异常」 |
 | 自建窗口里放 `<webview>` 装官网（照 JinkoWu 的 DeepSeek 插件那套） | 页面上拿到的只是个空元素：uTools 构造插件窗口时只把 `webPreferences.preload` 透给 Electron，`webviewTag` 没这一项（uTools 自己的类型定义里 `webPreferences` 也只声明了 `preload`） |
 | **uBrowser**（现在这版） | 官网正常渲染；而且它的会话是**持久化**的（`%APPDATA%\uTools\Partitions\<插件id>.ubrowser` 真落盘），登录态和页面存储重启都在 |
-| 快捷键交给 uTools 的快捷键页 | 设不了 `Ctrl+Space`（那正是想要的组合）；插件侧也没有注册系统级热键的 API。现在改成**插件自己注册**，见下面「全局快捷键」 |
 
 代价是这一层只能用 uTools 给的那套链式 API（`goto` / `wait` / `focus` / `paste` / `evaluate` /
 `show` / `hide` / `run`），**没有窗口实例可拿**：窗口在不在只能问 `utools.getIdleUBrowsers()`，
@@ -26,11 +25,9 @@ plugin/            ← 插件根目录：uTools 加载/打包的都是这个目�
   index.html         主面板（uTools 搜索框里显示）
   page/ball.html     悬浮球页面（右键菜单、拖拽）
   page/ball-preload.js  悬浮球窗的 preload
-  page/panel.js      主面板交互（含"按一下组合键改键"的捕获）
+  page/panel.js      主面板交互
   js/config.js       配置读写（utools.dbStorage，唯一碰存储的地方）
   js/windows.js      悬浮球窗 + 对话窗（uBrowser 那一套）的创建/复用/拖拽/尺寸/会话地址策略
-  js/hotkey.js       全局快捷键：编译并拉起热键助手、收它报上来的按下事件
-  helper/hotkey.cs   热键助手的源码（C#，第一次用到时用系统自带的 csc.exe 现编成 exe）
   assets/logo.png    插件图标（由 tools/gen-icons.js 按 whale.svg 生成）
   assets/whale.svg   官网图标（favicon 的鲸鱼路径）
 tools/             ← 开发自检用，不进插件包
@@ -66,29 +63,14 @@ _archive/          ← 更早两版（顶层导航 + SRI 诊断/修复、webview
 | 右键悬浮球 | 菜单：打开/关闭对话、隐藏悬浮球 |
 | 面板「打开对话」 | 同上；面板里还能显示/隐藏悬浮球、把它放回右下角 |
 | 面板「对话窗大小」 | 填宽高点「应用」，**下次开窗生效**（uBrowser 改不了正在开的那个窗口） |
-| 面板「全局快捷键」 | 显示当前组合与注册状态；点「改键」直接按下组合键就能改，点「默认」回到 `Ctrl+Space` |
+| 面板「全局快捷键」 | 显示当前绑定，点「设置」跳到 uTools 快捷键页去配 |
 
-**全局快捷键是插件自己注册的**（默认 `Ctrl+Space`，按一下开/关对话窗）：
-
-- 怎么实现的：插件带一份 C# 源码 `helper/hotkey.cs`，第一次用到时用**系统自带的 csc.exe**
-  （`.NET Framework` 那个，Win10 上一定有）现编成 exe 放到临时目录，由它去调 Windows 原生的
-  `RegisterHotKey`；按下热键时它往 stdout 打一行，插件接住就开关对话窗。改键 = 把助手杀掉、
-  用新组合重开（启动时注册这条最稳；从别的线程拿那个窗口句柄再注册会被系统当成重复注册）。
-- 为什么不用页面里的按键监听：那种只在插件窗口有焦点时才算数，等于没有全局快捷键。
-- 组合怎么写：`Ctrl+Space`、`Ctrl+Alt+D`、`Win+Shift+K`、`F9`、`Ctrl+-` 都行；面板上按组合键时
-  **至少要带一个修饰键**（否则会把那个单键从所有程序手里抢走，插件不做这种事）。
-- 注册不上会告诉你原因（多半是"被别的程序占着"，win32 1408）：`Ctrl+Space` 在 Windows 上
-  默认归输入法的中英切换，如果你机器的输入法把它占着，换个组合就行。
-- **插件被回收后热键会短暂失效**：uTools 会在插件退到后台几分钟后回收进程（本机设置 3 分钟），
-  热键助手是插件的子进程，一起没。插件注册了一个每分钟的定时任务把自己拉回来
-  （`utools.requestSchedule`，官方文档写明插件没在跑也会被拉起），所以最多空一分钟；
-  在 uTools 设置里关掉这个插件的「自动结束」就不会有空档。
-- 备用入口：uTools 那边的绑定仍然留着（`plugin.json` 里的 `deepseek-window` 指令），
-  面板底部那条链接会跳到 uTools 的快捷键设置页 —— 那边设不了 `Ctrl+Space`，但设别的组合可以。
-
-**uTools 那边那条快捷键指令还在**（`plugin.json` 里的 `deepseek-window`），走它进入插件时也是
-开/关对话窗。它的绑定由 uTools 管，插件只能读出来显示、跳过去设置 —— 那是备用入口，
-主线是上面那个自己注册的全局热键。
+**快捷键只负责"把窗口叫到跟前"，不会关窗。** 上一版是"三态"（没开就开 / 被盖住就调到最前 /
+已经在最前面才收起），第三态靠 `window.isFocused()` 判断 —— uBrowser 给不出焦点信息，那个判断
+做不了了。盲操时第一下就把用户正想看的窗口关掉，比"多按一下没关掉"难受得多，所以定成
+"只叫不关"：关窗点悬浮球、球上的右键菜单，或者对话窗自己的关闭按钮。
+（插件自己没有注册系统级热键的 API，键是 uTools 管的：`getCmdHotKey` 只读、
+`redirectHotKeySetting` 只跳转，都不会替你创建绑定。）
 
 **选中文字时**，uTools 的划词菜单里会有：向deepseek提问/搜索、找deepseek翻译、变量取名、
 总结内容；选中的是网址时还有「总结网页内容」。点一下就开窗、把文字贴进输入框并发送；
@@ -123,10 +105,6 @@ _archive/          ← 更早两版（顶层导航 + SRI 诊断/修复、webview
   `input[type=file][multiple] + div[role=button]`）是照参考实现抄的实测值，都在
   `js/windows.js` 顶上，官网一改版就得跟着改。
 - **窗口是 uTools 的**，标题栏、右键菜单、开发者工具入口都是它那套；插件只能拿到它给的窗口信息。
-- **热键助手是现编现跑的 exe**：源码在 `helper/hotkey.cs`，第一次用到时用系统自带的 `csc.exe`
-  编译到临时目录再运行。系统里没有 .NET Framework 的编译器、或者杀软不让运行"刚编译出来的程序"时，
-  热键用不了 —— 面板上会写"用不了：..."，这时退回用 uTools 那条绑定（面板底部有入口）。
-  编译产物在 `%TEMP%\deepseek-hovering\hotkey.exe`，删掉就会重新编一次。
 - **图标是 DeepSeek 的**，商标权归 DeepSeek。自己用没问题，往插件市场发布建议换掉。
 
 ## 开发时能跑的自检
@@ -139,8 +117,7 @@ npm run icons     # 照着 assets/whale.svg 重新生成 assets/logo.png
 `check.js` 会用桩件真跑 `preload.js`：进入插件 → 开球 → 点球开关对话窗（断言 uBrowser 那条链上的
 每一步：`goto` 去哪、`wait` 等什么、`paste` 贴了什么、`click` 点哪里）→ 送文字提问（五种引子各验一遍）→
 地址与尺寸回流（页面里 `evaluate` 出来的地址怎么被记下、首页怎么被忘掉、尺寸怎么被夹取）→
-快捷键只叫不关 → 面板改尺寸 → 全局热键（编译助手、默认组合、按下开合、改键等于杀掉重开、
-组合被占用时报出原因、助手被杀后由保活任务拉回来）。uBrowser 的链式 API 在桩件里是"每步都记下来"的假实现，
+快捷键只叫不关 → 面板改尺寸。uBrowser 的链式 API 在桩件里是"每步都记下来"的假实现，
 所以链路有没有走对是能测的；测不了的是"官网到底渲染没渲染、文字有没有真的落到输入框里"——
 那部分只能人工过：**开发者工具加载 `plugin/` → 点球 → 看官网界面正常 → 登录 → 选中文字试一条指令 →
 在窗口里点开一个会话 → 关掉再开，看落没落回那个会话 → 完全退出 uTools 重启看登录态还在不在。**
