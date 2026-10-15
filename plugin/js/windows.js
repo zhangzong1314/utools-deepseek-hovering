@@ -344,9 +344,6 @@ function collapseBallMenu() {
 
 const SITE = 'https://chat.deepseek.com/'
 
-// 认"哪个 uBrowser 窗口是我们的"：地址落在官网域名上就算（登录页也算）。
-const CHAT_URL_RE = /^https:\/\/chat\.deepseek\.com\//
-
 // 官网的 DOM 钩子。这几条是从参考实现（JinkoWu 的 DeepSeek）那儿搬来的实测值，
 // 官网改版会让它们失效 —— 那时表现是"文字没粘进去"或"点了不发送"，先看这里。
 const SEL_INPUT = 'textarea'
@@ -409,15 +406,21 @@ function resetChatSize() {
 let chatWinId = null
 // 我们自己正在跑的 uBrowser 操作条数（findChatWindowId 靠它区分"窗口忙"和"窗口没了"）
 let chatBusy = 0
+// 正在建窗的这一次（连按两下别开出两个窗口）
+let chatOpening = null
 
 /**
- * 当前插件空闲的 uBrowser 窗口里，哪些是 DeepSeek 对话窗。
+ * 当前插件空闲的 uBrowser 窗口里，哪个是 DeepSeek 对话窗（最多一个）。
  *
  * getIdleUBrowsers() 给的是"本插件下、操作队列已经跑完"的窗口 —— 我们自己的链式操作
  * 执行期间那个窗口不在列表里，所以这个函数只在链条外面调。
- * 认领条件两条：id 和我们记的那个对得上（用户把页面点到站外了也还认），
- * 或者地址在官网域名上（插件重启、id 丢了的时候靠它认回来 —— 注意实例上的 url 实测是空的，
- * 这条其实多半认不回来，所以 chatWinId 那个缓存很重要，任何时候都别无故清掉）。
+ *
+ * 认领分两步，第二步是必须的：
+ *   1. id 和我们记的那个对得上（同一个进程里最准）；
+ *   2. 对不上就认列表里最后一个 —— **本插件只会开一个 uBrowser 窗口**，所以"列表里有东西"
+ *      就等于"那是我们的对话窗"。这一条是给"插件进程重启"兜底的：uBrowser 窗口不随插件进程
+ *      消失，而窗口实例上的 url 实测是空的、id 又随进程丢了，光靠地址认不回来 ——
+ *      不兜底的话，每重启一次插件就会又多开一个窗口出来（实测撞上过）。
  */
 function chatWindows() {
   let list = []
@@ -427,12 +430,14 @@ function chatWindows() {
     warnOnce('idleBrowsers', '[chat] utools.getIdleUBrowsers 不可用，认不出已经开着的对话窗:', e)
     return []
   }
-  const mine = list.filter((w) => w && (w.id === chatWinId ||
-    (typeof w.url === 'string' && CHAT_URL_RE.test(w.url))))
+  if (!list.length) return []
+
+  const mine = list.filter((w) => w && w.id === chatWinId)
+  const picked = mine.length ? mine[mine.length - 1] : list[list.length - 1]
   // 只更新缓存的 id，**不清空**：窗口正忙（操作队列在跑）时它不在这个列表里，
   // 清掉的话下一次调用就彻底认不出它了，于是又开一个新窗口出来。
-  if (mine.length) chatWinId = mine[mine.length - 1].id
-  return mine
+  if (picked) chatWinId = picked.id
+  return picked ? [picked] : []
 }
 
 /**
@@ -564,7 +569,26 @@ function stopChatPoll() {
 }
 
 /** 开窗（没有的话）或把已经开着的窗口摆到桌面上 */
+/**
+ * 开窗（没有的话）或把已经开着的窗口摆到桌面上。
+ *
+ * 外面套一层"正在开"的闸：建窗是异步的（goto → run 要一会儿），这中间窗口还没进空闲列表，
+ * 连按两下快捷键就会两次都判定成"没有窗口"，于是开出两个来。
+ */
 function showChat() {
+  if (chatOpening) return chatOpening
+  chatOpening = doShowChat().then((opened) => {
+    chatOpening = null
+    return opened
+  }, (e) => {
+    chatOpening = null
+    console.error('[chat] 打开对话窗失败:', e)
+    return false
+  })
+  return chatOpening
+}
+
+function doShowChat() {
   return findChatWindowId().then((id) => {
     if (id !== null) {
       return runOnWindow(id, utools.ubrowser.show()).then(() => {
@@ -598,9 +622,6 @@ function showChat() {
         // 交给几秒后的那次轮询（那时 goto 的地址已经到位了）。
         return true
       })
-  }).catch((e) => {
-    console.error('[chat] 打开对话窗失败:', e)
-    return false
   })
 }
 

@@ -702,8 +702,7 @@ function checkRuntime() {
     return true
   })
 
-  check('快捷键和点球一个动作：第一下开，第二下关', async () => {
-    const rt = createRuntime({ callbackMode: 'async' })
+  check('快捷键和点球一个动作：第一下开，第二下关', async () => {    const rt = createRuntime({ callbackMode: 'async' })
     rt.enter({ code: 'deepseek-window', from: 'hotkey' })
     await rt.settle()
     if (rt.state.ubWindows.length !== 1) return '快捷键没开出对话窗'
@@ -767,6 +766,32 @@ function checkRuntime() {
     const gone = ['debugHint', 'devtoolsBtn', 'netlogBtn', 'tracelogBtn', 'name="openin"']
     const left = gone.filter((token) => html.indexOf(token) !== -1)
     return left.length ? 'index.html 里还剩 ' + left.join(', ') : true
+  })
+
+  check('插件重启后不会再多开一个窗口（uBrowser 窗口还活着、id 却丢了）', async () => {
+    const rt = createRuntime({ callbackMode: 'async' })
+    // 模拟"上一次插件会话留下的窗口"：uTools 那边还在，插件这边完全不知道它
+    rt.state.ubWindows.push({ id: 77, url: '', title: 'DeepSeek', width: 460, height: 900, x: 0, y: 0, shown: true })
+    rt.enter({ code: 'deepseek-window', from: 'hotkey' })
+    await rt.settle()
+    if (rt.state.ubWindows.length !== 1) {
+      return '又多开了一个窗口（现在 ' + rt.state.ubWindows.length + ' 个）'
+    }
+    const show = rt.state.chains.filter((c) => c.steps.some((s) => s.op === 'show'))
+    return show.length ? true : '没把留下的那个窗口摆出来'
+  })
+
+  check('连按两下只开一个窗口（建窗是异步的，中间那段判定要看住）', async () => {
+    const rt = createRuntime({ callbackMode: 'async' })
+    // 不 await：模拟用户连按两下
+    rt.enter({ code: 'deepseek-window', from: 'hotkey' })
+    rt.enter({ code: 'deepseek-window', from: 'hotkey' })
+    await rt.settle()
+    if (rt.state.ubWindows.length !== 1) {
+      return '连按两下开出了 ' + rt.state.ubWindows.length + ' 个窗口'
+    }
+    const creates = rt.state.chains.filter((c) => typeof c.target === 'object')
+    return creates.length === 1 ? true : '建窗链条跑了 ' + creates.length + ' 次'
   })
 
   check('窗口创建回调同步触发时也走一遍（uTools 各版本时序不一致）', () => {
