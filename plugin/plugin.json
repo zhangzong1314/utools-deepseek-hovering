@@ -3,7 +3,7 @@
   "version": "2.0.0",
   "description": "桌面悬浮球：单击打开 DeepSeek 官网对话（官网账号登录），选中文字可随时提问/翻译/总结",
   "author": "zhanghui",
-  "homepage": null,
+  "homepage": "https://github.com/zhangzong1314/utools-deepseek-hovering",
   "main": "index.html",
   "logo": "assets/logo.png",
   "preload": "preload.js",
