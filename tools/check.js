@@ -245,14 +245,40 @@ function checkWiring() {
     return left.length ? '这些文件还在：' + left.join(', ') : true
   })
 
+  check('会话地址靠"问页面"拿（uTools 给的实例没有 url）', () => {
+    if (windowsSrc.indexOf('function probePage') === -1) return 'windows.js 里没有 probePage'
+    if (windowsSrc.indexOf('function inspectChat') === -1) return 'windows.js 里没有 inspectChat'
+    if (windowsSrc.indexOf('location.href') === -1) return 'probePage 没读 location.href'
+    // 反面：不该再有人拿实例上的 url 当唯一来源
+    if (windowsSrc.indexOf('absorb') !== -1) return 'absorb（读实例 url 的那版）还在'
+    return true
+  })
+
+  check('窗口摆着时会轮询地址（用户拿窗口的 × 关窗时我们收不到事件）', () => {
+    if (windowsSrc.indexOf('CHAT_POLL_MS') === -1) return '没有轮询间隔常量'
+    if (windowsSrc.indexOf('function startChatPoll') === -1) return '没有 startChatPoll'
+    if (windowsSrc.indexOf('function stopChatPoll') === -1) return '没有 stopChatPoll'
+    const startCalls = (windowsSrc.match(/startChatPoll\(\)/g) || []).length
+    const stopCalls = (windowsSrc.match(/stopChatPoll\(\)/g) || []).length
+    if (startCalls < 3) return '开窗那几条路上没接上 startChatPoll（只在定义处见到）'
+    if (stopCalls < 2) return '藏窗时没停掉轮询'
+    return true
+  })
+
+  check('所有对已有窗口的操作都走 runOnWindow（否则分不清"窗口忙"和"窗口没了"）', () => {
+    const runs = (windowsSrc.match(/\.run\(id\)/g) || []).length
+    // 唯一允许直接 .run(id) 的地方是 runOnWindow 自己
+    return runs === 1 ? true : 'window.js 里有 ' + runs + ' 处直接 .run(id)，应该都走 runOnWindow'
+  })
+
   check('SITE 与"认可会话地址"的域名一致', () => {
     const site = (windowsSrc.match(/const SITE\s*=\s*'([^']+)'/) || [])[1]
     if (!site) return 'windows.js 里找不到 SITE'
-    // 取整行里最后那个 / —— 正则里全是转义的 \/，不能用它当结束标记
-    const re = (windowsSrc.match(/CONVERSATION_RE\s*=\s*(\/[^\n]*\/)/) || [])[1]
-    if (!re) return 'windows.js 里找不到 CONVERSATION_RE'
-    const host = site.replace(/^https:\/\//, '').replace(/\/$/, '').replace(/\./g, '\\.')
-    return re.indexOf(host) !== -1 ? true : 'SITE=' + site + '，但认会话地址的正则是 ' + re
+    const prefix = (windowsSrc.match(/CHAT_HOST_PREFIX\s*=\s*'([^']+)'/) || [])[1]
+    if (!prefix) return 'windows.js 里找不到 CHAT_HOST_PREFIX'
+    return prefix.indexOf(site) === 0 || site.indexOf(prefix) === 0
+      ? true
+      : 'SITE=' + site + '，但认地址的前缀是 ' + prefix
   })
 
   check('存储键只在 js/config.js 里定义', () => {
@@ -345,6 +371,9 @@ function createRuntime(options) {
     chains: [],
     ubWindows: [],
     nextWinId: 0,
+    // 页面里 evaluate 出来的东西（假 DOM 里没有真页面，由测试按需塞：
+    // inspectChat 读的那个 {url,width,height} 就从这儿来）
+    probe: null,
   }
 
   /** 假窗口（悬浮球用） */
@@ -413,7 +442,7 @@ function createRuntime(options) {
         if (!win) return Promise.reject(new Error('uBrowser 窗口已经不在了'))
         if (record.steps.some((s) => s.op === 'hide')) win.shown = false
         if (record.steps.some((s) => s.op === 'show')) win.shown = true
-        const results = record.steps.map(() => undefined)
+        const results = record.steps.map((s) => (s.op === 'evaluate' ? state.probe : undefined))
         return Promise.resolve(results.concat([win]))
       }
 
@@ -431,7 +460,7 @@ function createRuntime(options) {
         options: winOpts,
       }
       state.ubWindows.push(win)
-      const results = record.steps.map(() => undefined)
+      const results = record.steps.map((s) => (s.op === 'evaluate' ? state.probe : undefined))
       return Promise.resolve(results.concat([win]))
     }
     return chain
@@ -450,7 +479,10 @@ function createRuntime(options) {
       }
       return win
     },
-    ubrowser: makeChain([]),
+    // 真的 utools.ubrowser 每次访问都是一条**新的**操作队列（链），不是同一条往下挂，
+    // 所以这里用 getter 每次给一条新链 —— 否则上一轮的步骤会留在队列里，
+    // run() 返回的 [...各步结果] 就对不上号了。
+    get ubrowser() { return makeChain([]) },
     getIdleUBrowsers() {
       // "空闲"= 操作队列跑完了；桩件里没有并发，所以创建过的都算空闲（藏着的也算 ——
       // uTools 那个列表同样不带可见性）
@@ -640,15 +672,17 @@ function checkRuntime() {
     return focused.length ? true : '该把光标放进输入框，却什么都没做'
   })
 
-  check('地址与尺寸回流：从 uBrowser 的窗口实例上收下来', async () => {
+  check('地址与尺寸回流：只能从页面里问（uTools 给的窗口实例没有 url）', async () => {
     const rt = createRuntime({ callbackMode: 'async' })
     rt.fireIpc('ball:click')
     await rt.settle()
+    if (rt.state.db.has('deepseek:lastChatUrl')) {
+      return '刚开窗就把地址记下来了 —— 那会儿页面还没进去，问回来的只会是空的/首页'
+    }
+
     const conv = SITE + 'a/chat/s/75e63fe1-08bc-4e0b-a957-270557e00482'
-    rt.state.ubWindows[0].url = conv + '#draft'
-    rt.state.ubWindows[0].width = 3000
-    rt.state.ubWindows[0].height = 3000
-    rt.fireIpc('ball:click')   // 藏起来这一步会顺手把地址和尺寸收下来
+    rt.state.probe = { url: conv + '#draft', width: 3000, height: 3000 }
+    rt.fireIpc('ball:click')          // 关：先问地址和尺寸，再藏
     await rt.settle()
     if (rt.state.db.get('deepseek:lastChatUrl') !== conv) {
       return '没记住会话地址（存的是 ' + rt.state.db.get('deepseek:lastChatUrl') + '）'
@@ -656,13 +690,13 @@ function checkRuntime() {
     const size = JSON.parse(rt.state.db.get('deepseek:chatSize'))
     if (size.width > 1600 || size.height > 1080) return '尺寸没夹取就落库了：' + JSON.stringify(size)
 
-    rt.state.ubWindows[0].url = SITE + 'sign_in'
-    rt.fireIpc('ball:click')
+    rt.state.probe = { url: SITE + 'sign_in', width: 460, height: 900 }
+    rt.fireIpc('ball:click')          // 开：show 之后也会问一次
     await rt.settle()
     if (rt.state.db.get('deepseek:lastChatUrl') !== conv) return '路过登录页把记住的会话冲掉了'
 
-    rt.state.ubWindows[0].url = SITE
-    rt.fireIpc('ball:click')
+    rt.state.probe = { url: SITE, width: 460, height: 900 }
+    rt.fireIpc('ball:click')          // 关：这次问回来的是对话首页
     await rt.settle()
     if (rt.state.db.has('deepseek:lastChatUrl')) return '回到对话首页没把会话忘掉'
     return true
@@ -764,6 +798,9 @@ async function main() {
     process.exit(1)
   }
   console.log('全部通过（' + passed + ' 项）')
+  // 插件代码里有 setInterval（对话窗的地址轮询），跑完得自己退出，
+  // 否则 Node 会一直等着那个定时器。
+  process.exit(0)
 }
 
 main()

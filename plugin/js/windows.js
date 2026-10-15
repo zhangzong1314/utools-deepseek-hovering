@@ -392,7 +392,11 @@ function resolveChatSize(override) {
  */
 function saveChatSize(width, height) {
   const size = resolveChatSize({ width, height })
-  config.setChatSize(size.width, size.height)
+  // 轮询每隔几秒就会带着"当前尺寸"来一次，值没变就别写库（leveldb 每次写都是一条新记录）。
+  const cur = config.getChatSize()
+  if (!cur || cur.width !== size.width || cur.height !== size.height) {
+    config.setChatSize(size.width, size.height)
+  }
   return size
 }
 
@@ -403,6 +407,8 @@ function resetChatSize() {
 
 // uBrowser 的窗口 id。它只是个缓存：真判断"窗口还在不在"一律以 getIdleUBrowsers 为准。
 let chatWinId = null
+// 我们自己正在跑的 uBrowser 操作条数（findChatWindowId 靠它区分"窗口忙"和"窗口没了"）
+let chatBusy = 0
 
 /**
  * 当前插件空闲的 uBrowser 窗口里，哪些是 DeepSeek 对话窗。
@@ -410,7 +416,8 @@ let chatWinId = null
  * getIdleUBrowsers() 给的是"本插件下、操作队列已经跑完"的窗口 —— 我们自己的链式操作
  * 执行期间那个窗口不在列表里，所以这个函数只在链条外面调。
  * 认领条件两条：id 和我们记的那个对得上（用户把页面点到站外了也还认），
- * 或者地址在官网域名上（插件重启、id 丢了的时候靠它认回来）。
+ * 或者地址在官网域名上（插件重启、id 丢了的时候靠它认回来 —— 注意实例上的 url 实测是空的，
+ * 这条其实多半认不回来，所以 chatWinId 那个缓存很重要，任何时候都别无故清掉）。
  */
 function chatWindows() {
   let list = []
@@ -422,8 +429,46 @@ function chatWindows() {
   }
   const mine = list.filter((w) => w && (w.id === chatWinId ||
     (typeof w.url === 'string' && CHAT_URL_RE.test(w.url))))
-  chatWinId = mine.length ? mine[mine.length - 1].id : null
+  // 只更新缓存的 id，**不清空**：窗口正忙（操作队列在跑）时它不在这个列表里，
+  // 清掉的话下一次调用就彻底认不出它了，于是又开一个新窗口出来。
+  if (mine.length) chatWinId = mine[mine.length - 1].id
   return mine
+}
+
+/**
+ * 找对话窗的 id（找不到就是 null）。
+ *
+ * 这套 API 认不出"正忙"和"已经关掉了"这两种情况 —— 都表现为"不在空闲列表里"。
+ * 我们自己知道自己有没有在跑操作（chatBusy），所以：手上没在跑却找不到 → 窗口真的没了
+ * （用户拿窗口的 × 关掉了），把缓存清掉；手上正跑着 → 那是我们自己在占着队列，等一下再问。
+ */
+function findChatWindowId(attempts) {
+  const list = chatWindows()
+  if (list.length) return Promise.resolve(list[list.length - 1].id)
+  if (chatWinId === null) return Promise.resolve(null)
+  if (!chatBusy) {
+    chatWinId = null
+    return Promise.resolve(null)
+  }
+  const left = typeof attempts === 'number' ? attempts : 3
+  if (left <= 0) return Promise.resolve(null)
+  return new Promise((ok) => setTimeout(ok, 150)).then(() => findChatWindowId(left - 1))
+}
+
+/**
+ * 我们发起的每一次 uBrowser 操作都从这里走：一来记账（findChatWindowId 要靠它区分
+ * "窗口忙"和"窗口没了"），二来保证同一时刻只有一条操作队列 —— 窗口不空闲时再套一条
+ * 会被 uTools 拒掉。
+ */
+function runOnWindow(id, chain) {
+  chatBusy++
+  return chain.run(id).then((result) => {
+    chatBusy--
+    return result
+  }, (e) => {
+    chatBusy--
+    throw e
+  })
 }
 
 /**
@@ -444,56 +489,119 @@ function lastOf(result) {
 }
 
 /**
- * 把窗口实例上的信息收下来：当前地址（记住上次的会话）和当前尺寸（用户拖过窗口就靠这个记住）。
- * 每次跟这个窗口打完交道都过一遍。
+ * 在页面里跑的一小段：报告"现在开着哪个地址、窗口多大"。
+ * 会被序列化送进页面，不能引用外部任何东西。
  */
-function absorb(instance) {
-  if (!instance) return
-  if (typeof instance.url === 'string' && instance.url) rememberChatUrl(instance.url)
-  if (typeof instance.width === 'number' && typeof instance.height === 'number' &&
-    instance.width > 0 && instance.height > 0) {
-    saveChatSize(instance.width, instance.height)
-  }
+function probePage() {
+  return { url: location.href, width: window.outerWidth, height: window.outerHeight }
+}
+
+/**
+ * 问一下这个窗口"你现在开着哪个页面、多大"，把答案收下来。
+ *
+ * 为什么不直接用 uTools 给的窗口实例上的 url：**那两项里只有几何是有值的，url 是空的** ——
+ * 实测证据是插件自己的 dbStorage 里 `deepseek:chatShown`/`chatSize` 都写了、
+ * `deepseek:lastChatUrl` 一次都没写过，于是"记住上次会话"永远记不住。
+ * 何况就算它有值，那也是 uTools 记的窗口地址，用户在官网里点着换会话（SPA pushState）
+ * 未必跟着更新。页面里的 location.href 才是真的。
+ *
+ * 尺寸顺便也在这儿读：instance 上的宽高是开窗时给的那个，用户拖过窗口之后
+ * 得从页面里问才有新值。
+ *
+ * @returns {Promise<string>} 读回来的地址（读不到就是空串）
+ */
+function inspectChat(id) {
+  return runOnWindow(id, utools.ubrowser.evaluate(probePage)).then((result) => {
+    const info = Array.isArray(result) ? result[0] : null
+    const instance = lastOf(result)
+
+    const url = info && typeof info.url === 'string' && info.url
+      ? info.url
+      : (instance && typeof instance.url === 'string' ? instance.url : '')
+    if (url) rememberChatUrl(url)
+
+    const width = Number((info && info.width) || (instance && instance.width) || 0)
+    const height = Number((info && info.height) || (instance && instance.height) || 0)
+    if (width > 0 && height > 0) saveChatSize(width, height)
+
+    return url
+  }).catch((e) => {
+    // 窗口可能已经没了、或者操作队列正忙 —— 记不住这一笔不影响使用
+    console.error('[chat] 读对话窗状态失败:', e)
+    return ''
+  })
+}
+
+// 页面里的地址是用户自己点着变的（SPA），uTools 不通知我们，窗口实例上的 url 又是空的 ——
+// 所以窗口摆着的时候隔几秒主动问一次页面。用户拿窗口自己的 × 关窗时我们收不到任何事件，
+// 这一次一次的问就是他"关窗那一刻"能记住会话的唯一办法。
+// （uTools 主窗口隐藏后定时器会被节流到 1Hz，5 秒一次照样够用。）
+const CHAT_POLL_MS = 5000
+let chatPollTimer = null
+let chatPolling = false
+
+function startChatPoll() {
+  if (chatPollTimer) return
+  chatPollTimer = setInterval(() => {
+    // 上一次还没问完就跳过这一轮，别把操作队列摞起来
+    if (chatPolling) return
+    const list = chatWindows()
+    if (!list.length) {
+      stopChatPoll()
+      return
+    }
+    chatPolling = true
+    inspectChat(list[list.length - 1].id).then(() => { chatPolling = false },
+      () => { chatPolling = false })
+  }, CHAT_POLL_MS)
+}
+
+function stopChatPoll() {
+  if (!chatPollTimer) return
+  clearInterval(chatPollTimer)
+  chatPollTimer = null
+  chatPolling = false
 }
 
 /** 开窗（没有的话）或把已经开着的窗口摆到桌面上 */
 function showChat() {
-  const list = chatWindows()
-  if (list.length) {
-    const id = list[list.length - 1].id
-    return utools.ubrowser.show().run(id).then((result) => {
-      absorb(lastOf(result))
-      config.setChatShown(true)
-      return true
-    }).catch((e) => {
-      console.error('[chat] 显示对话窗失败:', e)
-      return false
-    })
-  }
+  return findChatWindowId().then((id) => {
+    if (id !== null) {
+      return runOnWindow(id, utools.ubrowser.show()).then(() => {
+        config.setChatShown(true)
+        startChatPoll()
+        // 摆出来之后再问一次：藏着的这段时间里地址可能变过（插件重启过、或上一次的
+        // 最后一次问晚了）。新建那条路上故意不问，理由见下面。
+        return inspectChat(id).then(() => true)
+      })
+    }
 
-  const size = resolveChatSize()
-  return utools.ubrowser
-    .goto(config.getLastChatUrl() || SITE)
-    .show()
-    .run({
-      title: 'DeepSeek',
-      width: size.width,
-      height: size.height,
-      minWidth: MIN_CHAT_SIZE.width,
-      minHeight: MIN_CHAT_SIZE.height,
-      center: true,
-    })
-    .then((result) => {
-      const instance = lastOf(result)
-      if (instance && typeof instance.id === 'number') chatWinId = instance.id
-      absorb(instance)
-      config.setChatShown(true)
-      return true
-    })
-    .catch((e) => {
-      console.error('[chat] 打开对话窗失败:', e)
-      return false
-    })
+    const size = resolveChatSize()
+    return utools.ubrowser
+      .goto(config.getLastChatUrl() || SITE)
+      .show()
+      .run({
+        title: 'DeepSeek',
+        width: size.width,
+        height: size.height,
+        minWidth: MIN_CHAT_SIZE.width,
+        minHeight: MIN_CHAT_SIZE.height,
+        center: true,
+      })
+      .then((result) => {
+        const instance = lastOf(result)
+        if (instance && typeof instance.id === 'number') chatWinId = instance.id
+        config.setChatShown(true)
+        startChatPoll()
+        // 刚开出来页面还在加载，这会儿问回来的多半是首页 —— 而"看到首页"会被
+        // rememberChatUrl 当成用户回到了首页、把记住的会话清掉。所以新建这条路上不问地址，
+        // 交给几秒后的那次轮询（那时 goto 的地址已经到位了）。
+        return true
+      })
+  }).catch((e) => {
+    console.error('[chat] 打开对话窗失败:', e)
+    return false
+  })
 }
 
 /**
@@ -501,13 +609,14 @@ function showChat() {
  * 藏起来之后那一页还在（登录态、正在打的字都在），再点球是一瞬间的事。
  */
 function hideChat() {
-  const list = chatWindows()
   config.setChatShown(false)
-  if (!list.length) return Promise.resolve(false)
-  const id = list[list.length - 1].id
-  return utools.ubrowser.hide().run(id).then((result) => {
-    absorb(lastOf(result))
-    return true
+  stopChatPoll()
+  return findChatWindowId().then((id) => {
+    if (id === null) return false
+    // 先问地址、再藏。用户按这一下"关闭"的时刻，正是最该记住他停在哪个会话的时候。
+    return inspectChat(id)
+      .then(() => runOnWindow(id, utools.ubrowser.hide()))
+      .then(() => true)
   }).catch((e) => {
     console.error('[chat] 隐藏对话窗失败:', e)
     return false
@@ -564,31 +673,33 @@ function askChat(action) {
 
   return showChat().then((shown) => {
     if (!shown) return false
-    const list = chatWindows()
-    if (!list.length) return false
-    const id = list[list.length - 1].id
+    return findChatWindowId().then((id) => {
+      if (id === null) return false
 
-    let chain = utools.ubrowser.wait(SEL_INPUT, 60 * 1000)
-    if (text) {
-      chain = chain
-        .evaluate(stopGenerating, { input: SEL_INPUT, send: SEL_SEND })
-        .wait(200)
-        .focus(SEL_INPUT)
-        .paste(text)
-        .wait(500)
-        .click(SEL_SEND)
-    } else {
-      chain = chain.focus(SEL_INPUT)
-    }
+      let chain = utools.ubrowser.wait(SEL_INPUT, 60 * 1000)
+      if (text) {
+        chain = chain
+          .evaluate(stopGenerating, { input: SEL_INPUT, send: SEL_SEND })
+          .wait(200)
+          .focus(SEL_INPUT)
+          .paste(text)
+          .wait(500)
+          .click(SEL_SEND)
+      } else {
+        chain = chain.focus(SEL_INPUT)
+      }
 
-    return chain.show().run(id).then((result) => {
-      absorb(lastOf(result))
-      config.setChatShown(true)
-      return true
-    }).catch((e) => {
-      console.error('[chat] 把文字送进对话窗失败:', e)
-      return false
+      return runOnWindow(id, chain.show()).then(() => {
+        config.setChatShown(true)
+        startChatPoll()
+        // 送完问一句地址：官网这时多半已经把这个新会话的地址 pushState 上去了，
+        // 下次开窗就能直接落回这一条
+        return inspectChat(id).then(() => true)
+      })
     })
+  }).catch((e) => {
+    console.error('[chat] 把文字送进对话窗失败:', e)
+    return false
   })
 }
 
@@ -610,28 +721,37 @@ function summonChat() {
 
 // ---------- 记住上次打开的会话 ----------
 
-// 官网的会话地址长这样：https://chat.deepseek.com/a/chat/s/75e63fe1-08bc-4e0b-a957-270557e00482
-const CONVERSATION_RE = /^https:\/\/chat\.deepseek\.com\/a\/chat\/s\/[0-9A-Za-z_-]+/
+// 官网域名，以及"不必记住"的那些页面。
+// 会话地址长什么样由官网说了算：早先是 https://chat.deepseek.com/a/chat/s/<uuid>，
+// 但那是 SPA 自己 pushState 出来的，形状随时可能变 —— 所以判据放宽成
+// "官网域名下的页面，且不是首页 / 登录页 / 接口 / 静态资源"，而不是钉死某个前缀。
+const CHAT_HOST_PREFIX = 'https://chat.deepseek.com'
 // 对话首页（新对话 / 刚登录进来），命中它就把记住的会话忘掉
 const CHAT_HOME_RE = /^https:\/\/chat\.deepseek\.com(?:\/a\/chat)?\/?(?:[?#].*)?$/
+// 路过的地方，不该把上一次的会话冲掉，也不该被当成会话记住
+const CHAT_SKIP_RE = /^https:\/\/chat\.deepseek\.com\/(?:sign_in|api|oauth|static|_)/i
 
 /**
- * 对话窗报上来一个地址，决定要不要记住。
- * 只认会话地址；回到对话首页就清掉；登录页、中间的跳转页一律不动 ——
+ * 拿一个地址来判断"值不值得记住"。
+ *
+ * 只认官网自己的页面地址；回到对话首页就清掉；登录页、接口、站外地址一律不动 ——
  * 那些只是路过，不该把用户上一次的会话冲掉。
  *
- * "下次该开哪个地址"由宿主页自己读（page/chat-preload.js 把 config 递过去），
- * 所以这边只有这一条：**记哪个、什么时候忘**。
+ * @param {string} url 对话框里读回来的 location.href
  */
 function rememberChatUrl(url) {
   if (typeof url !== 'string' || !url) return
+  // hash 是 SPA 的临时状态（比如 #draft），存之前剥掉；查询串保留
   const clean = url.split('#')[0]
-  if (CONVERSATION_RE.test(clean)) {
-    // 去掉 hash（SPA 的临时状态），查询串保留
-    config.setLastChatUrl(clean)
+  if (clean.indexOf(CHAT_HOST_PREFIX) !== 0) return
+  if (CHAT_HOME_RE.test(clean)) {
+    config.setLastChatUrl(null)
     return
   }
-  if (CHAT_HOME_RE.test(clean)) config.setLastChatUrl(null)
+  if (CHAT_SKIP_RE.test(clean)) return
+  // 轮询会反复报同一个地址，值没变就别写库
+  if (config.getLastChatUrl() === clean) return
+  config.setLastChatUrl(clean)
 }
 
 module.exports = {
