@@ -93,18 +93,16 @@ function toggleChatWindow() {
 }
 
 /**
- * 快捷键按下时干什么。
+ * 快捷键按下时干什么：**和点悬浮球完全一样** —— 开着就藏起来，没开就打开。
  *
- * 语义见 js/windows.js 的 summonChat()：uBrowser 给不出"窗口在不在最前面"，所以现在
- * **只做"叫到跟前"，永不关窗**。既然永远不会关，搜索框就一律让开 ——
- * 从搜索框里敲 `DeepSeek窗口` 回车也能进到这里，那时搜索框正开着，顺手收掉才对；
- * 走快捷键那条路时搜索框根本没显示（feature 上配了 mainHide），这次调用也无害。
+ * 早先这里做成"只叫不关"（想着盲操时别把用户正看的窗口关掉），但 uBrowser 给不出
+ * "窗口在不在最前面"，于是那个判断做不了；两下一比，"按了关不掉"比"可能关掉正看的窗口"更别扭，
+ * 所以统一成开关 —— 球、面板按钮、快捷键，一个动作。
  */
 function handleHotkeyEnter() {
-  hidePanelWindow()
-  return windows.summonChat().then((action) => {
+  return toggleChatWindow().then((opened) => {
     emit()
-    return action
+    return opened
   })
 }
 

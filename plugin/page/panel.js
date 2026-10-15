@@ -62,8 +62,9 @@
     hotkeyValue.textContent = state.hotkey || '未设置'
     hotkeyValue.classList.toggle('none', !state.hotkey)
     hotkeyHint.textContent = state.hotkey
-      ? '按 ' + state.hotkey + ' 把对话窗叫到跟前（没开就打开，藏着或被盖住就摆到最前）。' +
-        '快捷键只负责叫出来、不会关窗 —— 关窗点悬浮球，或用对话窗自己的关闭按钮。'
+      ? '按 ' + state.hotkey + ' 开/关对话窗（和点悬浮球一样：开着就藏起来，没开就打开）。' +
+        '插件的「' + (state.hotkeyCmd || 'DeepSeek窗口') + '」这条指令在 uTools 的快捷键设置里，' +
+        '点上面的「设置」跳过去配 —— 那边设不了 Ctrl+Space 这类组合。'
       : '在 uTools 的全局快捷键里给「' + (state.hotkeyCmd || 'DeepSeek窗口') +
         '」这条指令绑一个键，就能随时把对话窗叫出来 —— 点「设置」直接跳过去。'
   }

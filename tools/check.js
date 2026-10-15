@@ -702,7 +702,7 @@ function checkRuntime() {
     return true
   })
 
-  check('快捷键只叫不关：第二下不会把窗口藏起来', async () => {
+  check('快捷键和点球一个动作：第一下开，第二下关', async () => {
     const rt = createRuntime({ callbackMode: 'async' })
     rt.enter({ code: 'deepseek-window', from: 'hotkey' })
     await rt.settle()
@@ -710,8 +710,12 @@ function checkRuntime() {
     rt.enter({ code: 'deepseek-window', from: 'hotkey' })
     await rt.settle()
     const hid = rt.state.chains.filter((c) => c.steps.some((s) => s.op === 'hide'))
-    if (hid.length) return '快捷键把窗口关掉了 —— 它现在只做"叫到跟前"'
-    return rt.state.ubWindows[0].shown ? true : '窗口被藏起来了'
+    if (!hid.length) return '第二下没把窗口藏起来（快捷键要和点球一样是开关）'
+    if (rt.host.state().chatOpen !== false) return '藏起来之后面板还当成开着'
+    rt.enter({ code: 'deepseek-window', from: 'hotkey' })
+    await rt.settle()
+    const shown = rt.state.chains.filter((c) => c.steps.some((s) => s.op === 'show'))
+    return shown.length >= 2 ? true : '第三下没把窗口再摆出来'
   })
 
   check('记住的会话：下次开窗直接开到那儿', async () => {

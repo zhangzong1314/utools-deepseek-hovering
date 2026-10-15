@@ -714,11 +714,6 @@ function askChat(action) {
  *
  * @returns {Promise<'open'|'front'>} 这次是开了个新的，还是把已有的叫到跟前
  */
-function summonChat() {
-  const wasVisible = isChatVisible()
-  return showChat().then(() => (wasVisible ? 'front' : 'open'))
-}
-
 // ---------- 记住上次打开的会话 ----------
 
 // 官网域名，以及"不必记住"的那些页面。
@@ -771,14 +766,13 @@ module.exports = {
   expandBallForMenu,
   collapseBallMenu,
   // 对话窗这一组全是异步的（uBrowser 的链式操作返回 Promise）：
-  // showChat/hideChat/toggleChat 返回 Promise<boolean>（true = 现在开着），
-  // askChat 返回 Promise<boolean>（有没有把文字送进去），summonChat 返回 Promise<'open'|'front'>。
+  // toggleChat/showChat/hideChat 返回 Promise<boolean>（true = 现在开着），
+  // askChat 返回 Promise<boolean>（有没有把文字送进去）。
   showChat,
   hideChat,
   toggleChat,
   isChatVisible,
   askChat,
-  summonChat,
   resolveChatSize,
   saveChatSize,
   resetChatSize,
