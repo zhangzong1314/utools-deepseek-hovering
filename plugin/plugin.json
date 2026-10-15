@@ -1,0 +1,117 @@
+{
+  "pluginName": "DeepSeek 悬浮助手",
+  "version": "2.0.0",
+  "description": "桌面悬浮球：单击打开 DeepSeek 官网对话（官网账号登录），选中文字可随时提问/翻译/总结",
+  "author": "zhanghui",
+  "homepage": null,
+  "main": "index.html",
+  "logo": "assets/logo.png",
+  "preload": "preload.js",
+  "platform": [
+    "win32",
+    "darwin",
+    "linux"
+  ],
+  "pluginSetting": {
+    "height": 680
+  },
+  "features": [
+    {
+      "code": "deepseek",
+      "description": "DeepSeek 悬浮助手：打开官网对话 / 显示桌面悬浮球",
+      "explain": "DeepSeek 悬浮助手：打开官网对话 / 显示桌面悬浮球",
+      "icon": "assets/logo.png",
+      "cmds": [
+        "deepseek",
+        "ds",
+        "深度求索",
+        "ai对话",
+        "悬浮球"
+      ]
+    },
+    {
+      "code": "deepseek-window",
+      "description": "打开/关闭 DeepSeek 对话窗（可在 uTools 全局快捷键里绑定按键）",
+      "explain": "打开/关闭 DeepSeek 对话窗",
+      "icon": "assets/logo.png",
+      "mainHide": true,
+      "cmds": [
+        "DeepSeek窗口"
+      ]
+    },
+    {
+      "code": "ask",
+      "description": "向 DeepSeek 提问/搜索",
+      "explain": "向deepseek提问/搜索",
+      "icon": "assets/logo.png",
+      "mainHide": true,
+      "cmds": [
+        {
+          "type": "over",
+          "minLength": 2,
+          "maxLength": 600,
+          "label": "向deepseek提问/搜索"
+        }
+      ]
+    },
+    {
+      "code": "translate",
+      "description": "找 DeepSeek 翻译",
+      "explain": "找deepseek翻译",
+      "icon": "assets/logo.png",
+      "mainHide": true,
+      "cmds": [
+        {
+          "type": "over",
+          "minLength": 2,
+          "maxLength": 7000,
+          "label": "找deepseek翻译"
+        }
+      ]
+    },
+    {
+      "code": "genvarname",
+      "description": "让 DeepSeek 帮忙取变量名",
+      "explain": "变量取名",
+      "icon": "assets/logo.png",
+      "mainHide": true,
+      "cmds": [
+        {
+          "type": "over",
+          "minLength": 2,
+          "maxLength": 30,
+          "label": "变量取名"
+        }
+      ]
+    },
+    {
+      "code": "summarize",
+      "description": "让 DeepSeek 总结内容",
+      "explain": "总结内容",
+      "icon": "assets/logo.png",
+      "mainHide": true,
+      "cmds": [
+        {
+          "type": "over",
+          "minLength": 10,
+          "maxLength": 12000,
+          "label": "总结内容"
+        }
+      ]
+    },
+    {
+      "code": "summarizeUrl",
+      "description": "让 DeepSeek 总结网页内容",
+      "explain": "总结网页内容",
+      "icon": "assets/logo.png",
+      "mainHide": true,
+      "cmds": [
+        {
+          "type": "regex",
+          "label": "总结网页内容",
+          "match": "/^https?(://)/i"
+        }
+      ]
+    }
+  ]
+}

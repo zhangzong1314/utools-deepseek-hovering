@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>DeepSeek</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --fg: #1f2437;
+    --muted: #6b7280;
+    --line: #e8eaf0;
+    --brand: #4D6BFE;
+  }
+
+  html.dark {
+    --bg: #1c1f27;
+    --fg: #e8eaf0;
+    --muted: #9aa1b1;
+    --line: #2e3340;
+    --brand: #6E86FF;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: var(--bg);
+    color: var(--fg);
+    font: 14px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  }
+
+  /* 官网就住在这个 webview 里。窗口不设 preload 的规矩是"它自己的页面才有 utools"，
+     所以远程页面拿不到任何插件侧的东西 —— 这是刻意的。 */
+  .webview {
+    width: 100%;
+    height: 100%;
+    display: block;
+  }
+
+  /* 兜底界面：只在"webview 起不来"或"这次导航真的失败了"时显示。
+     平时它压在最底下（display:none），不参与布局。 */
+  .fallback {
+    position: fixed;
+    inset: 0;
+    z-index: 10;
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    padding: 28px;
+    background: var(--bg);
+    text-align: center;
+  }
+
+  .fallback.show { display: flex; }
+
+  .mark {
+    width: 52px;
+    height: 52px;
+    border-radius: 15px;
+    background: linear-gradient(150deg, #6E86FF 0%, #4D6BFE 45%, #3B54E0 100%);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 6px 20px rgba(77, 107, 254, .3);
+  }
+
+  .mark img { width: 30px; height: 30px; display: block; }
+
+  .fallback h1 {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+  }
+
+  .fallback p {
+    margin: 0;
+    max-width: 30em;
+    font-size: 13px;
+    color: var(--muted);
+  }
+
+  .fallback button {
+    height: 38px;
+    padding: 0 22px;
+    margin-top: 4px;
+    border: 1px solid transparent;
+    border-radius: 10px;
+    background: linear-gradient(150deg, #6E86FF 0%, #4D6BFE 55%);
+    color: #fff;
+    font: inherit;
+    font-weight: 500;
+    cursor: pointer;
+  }
+
+  .fallback button:hover { background: linear-gradient(150deg, #6E86FF 0%, #3B54E0 55%); }
+</style>
+</head>
+<body>
+  <!--
+    对话窗的宿主页：官网活在下面这个 <webview> 里。
+
+    为什么是 <webview> 而不是"让窗口自己导航到官网"：实测顶层导航到 chat.deepseek.com 时，
+    官网那两只带 integrity + crossorigin 的脚本在这个窗口里加载不起来（请求 0 字节结束），
+    官网会弹「页面资源加载异常」。参考插件（JinkoWu 的 DeepSeek）用 webview + webSecurity:false
+    的做法在同一台机器上能正常打开，这套就是照它来的。
+
+    这个页面自己从不导航，也从不碰官网的 DOM —— 涉及官网的每一件事都走
+    webview.executeJavaScript()（见 page/chat-host.js）。
+  -->
+  <webview class="webview"></webview>
+
+  <div class="fallback" id="fallback">
+    <div class="mark">
+      <img src="../assets/whale.svg" alt="" draggable="false">
+    </div>
+    <h1 id="fbTitle">没能打开 DeepSeek</h1>
+    <p id="fbMsg">网络不通，或者这个页面被拦下来了。重试一下，还不行就查查代理。</p>
+    <button id="fbRetry" type="button">重试</button>
+  </div>
+
+  <script src="chat-host.js"></script>
+</body>
+</html>
